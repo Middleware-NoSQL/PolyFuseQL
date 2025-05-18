@@ -10,59 +10,59 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ---------- checkout ----------
-      - uses: actions/checkout@v4
+    # ─────────────────────────────────────  Checkout  ───────────────────────────────────── #
+    - uses: actions/checkout@v4
 
-      # ---------- Python + Poetry ----------
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          cache: 'pip'
+    # ──────────────────────────  Compose-up (postgres, redis, neo4j, seeds)  ────────────── #
+    - name: Compose up
+      uses: docker/compose-action@v2       # https://github.com/marketplace/actions/docker-compose-action
+      with:
+        compose-file: docker-compose.yml   # default is ./docker-compose.yml
+        up-flags: --build -d               # just like `docker compose up --build -d`
+        down-flags: --volumes              # auto-cleanup at job end
 
-      - name: Cache Poetry envs
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/pypoetry
-            ~/.virtualenvs
-          key: ${{ runner.os }}-poetry-${{ hashFiles('**/poetry.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-poetry-
+    # OPTIONAL: show logs while health-checks settle (handy when debugging)
+    - name: Tail container logs (90 s max)
+      run: |
+        timeout 90s bash -c '
+          until docker compose ps | grep "(healthy)"; do
+            docker compose ps
+            sleep 5
+          done'
+        docker compose ps
+        docker compose logs --tail=50
 
-      - name: Install Poetry
-        run: |
-          pip install -U pip
-          pip install poetry
+    # ─────────────────────────────────────  Python & Poetry  ─────────────────────────────── #
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+        cache: "pip"
 
-      # ---------- Docker Compose stack ----------
-      - name: Install docker-compose v2
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y docker-compose-plugin   # provides `docker compose`
+    - name: Cache Poetry envs
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/pypoetry
+          ~/.virtualenvs
+        key: ${{ runner.os }}-poetry-${{ hashFiles('**/poetry.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-poetry-
 
-      - name: Launch DB stack
-        run: |
-          docker compose version          # verify plugin
-          docker compose up -d            # uses repo's docker-compose.yml
+    - name: Install Poetry
+      run: |
+        pip install -U pip
+        pip install poetry
 
-      # optional: quick check that services are healthy
-      - name: Show compose status
-        run: |
-          docker compose ps
-          docker compose logs --tail=50
+    - name: Install dependencies
+      run: poetry install --with dev
 
-      # ---------- install deps ----------
-      - name: Install project dependencies
-        run: |
-          poetry install --with dev
+    # ─────────────────────────────────────  Lint & Test  ─────────────────────────────────── #
+    - name: Lint & test
+      run: |
+        poetry run black --check .
+        poetry run flake8 .
+        poetry run pytest -q --cov=polyfuseql --cov-report=xml
 
-      # ---------- lint & tests ----------
-      - name: Lint & test
-        run: |
-          poetry run black --check .
-          poetry run flake8 .
-          poetry run pytest -q --cov=polyfuseql --cov-report=xml
-
-      # ---------- coverage ----------
-      - name: Upload coverage
-        uses: codecov/codecov-action@v4
+    # ────────────────────────────────  Upload coverage to Codecov  ───────────────────────── #
+    - name: Upload coverage
+      uses: codecov/codecov-action@v4
