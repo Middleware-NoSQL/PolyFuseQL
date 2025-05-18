@@ -9,17 +9,21 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    # use docker-compose instead of individual service blocks
     services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports: ['5432:5432']
+      compose:
+        image: docker/compose:debian-1.29  # tiny wrapper image with docker-compose
         options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+          -v /var/run/docker.sock:/var/run/docker.sock
+          -v ${{ github.workspace }}:/workspace
+        env:
+          COMPOSE_DOCKER_CLI_BUILD: 1
+        command: >
+          sh -c "
+            cd /workspace &&
+            docker-compose up -d &&
+            docker-compose ps
+          "
 
     steps:
       - uses: actions/checkout@v4
@@ -27,8 +31,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
 
-      # ---------- cache poetry virtualenv ----------
+      # ---------- cache Poetry virtualenv ----------
       - name: Cache Poetry
         uses: actions/cache@v4
         with:
@@ -48,11 +53,20 @@ jobs:
         run: |
           poetry install --with dev
 
+      # ---------- wait for healthchecks ----------
+      - name: Wait for DBs to be healthy
+        run: |
+          docker-compose ps
+          docker-compose logs --no-color postgres redis neo4j
+
+      # ---------- lint & tests ----------
       - name: Lint & test
         run: |
           poetry run black --check .
           poetry run flake8 .
           poetry run pytest -q --cov=polyfuseql --cov-report=xml
 
+      # ---------- coverage upload ----------
       - name: Upload coverage
         uses: codecov/codecov-action@v4
+

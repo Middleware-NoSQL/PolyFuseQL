@@ -25,3 +25,11 @@ git clone https://github.com/<TU-USUARIO>/polyfuseql.git
 cd polyfuseql
 poetry install
 uvicorn app.main:app --reload
+```
+### Datos de ejemplo
+
+PolyFuseQL descarga en tiempo de ejecución los ficheros Northwind de:
+- https://github.com/harryho/db-samples (JSON)  
+- https://github.com/neo4j-graph-examples/northwind (Cypher)
+
+No redistribuimos esos archivos; solo se usan para pruebas locales.
