@@ -52,7 +52,7 @@ jobs:
         run: |
           poetry run black --check .
           poetry run flake8 .
-          poetry run pytest -q --cov=polyfuseql
+          poetry run pytest -q --cov=polyfuseql --cov-report=xml
 
       - name: Upload coverage
         uses: codecov/codecov-action@v4
