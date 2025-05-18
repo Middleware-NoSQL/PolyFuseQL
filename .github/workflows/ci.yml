@@ -10,33 +10,29 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    # ─────────────────────────────────────  Checkout  ───────────────────────────────────── #
+    # ───────────────────────────  Checkout  ──────────────────────────── #
     - uses: actions/checkout@v4
 
-    # ──────────────────────────  Compose-up (postgres, redis, neo4j, seeds)  ────────────── #
+    # ───────────────  Start full docker-compose stack  ──────────────── #
     - name: Compose up
-      uses: docker/compose-action@v2       # https://github.com/marketplace/actions/docker-compose-action
+      uses: hoverkraft-tech/compose-action@v2.0.1
       with:
-        compose-file: docker-compose.yml   # default is ./docker-compose.yml
-        up-flags: --build -d               # just like `docker compose up --build -d`
-        down-flags: --volumes              # auto-cleanup at job end
+        compose-file: docker-compose.yml     # default is ./docker-compose.yml
+        up-flags: --build -d                 # similar to `docker compose up --build -d`
+        # down-flags: --volumes              # add if you want volumes wiped
+      # If you need env vars for Compose, add `env:` here.
 
-    # OPTIONAL: show logs while health-checks settle (handy when debugging)
-    - name: Tail container logs (90 s max)
+    # Optional: show service list & last log lines (handy for CI debugging)
+    - name: Show compose status
       run: |
-        timeout 90s bash -c '
-          until docker compose ps | grep "(healthy)"; do
-            docker compose ps
-            sleep 5
-          done'
         docker compose ps
         docker compose logs --tail=50
 
-    # ─────────────────────────────────────  Python & Poetry  ─────────────────────────────── #
+    # ───────────────────────────  Python & Poetry  ───────────────────── #
     - uses: actions/setup-python@v5
       with:
-        python-version: "3.12"
-        cache: "pip"
+        python-version: '3.12'
+        cache: 'pip'
 
     - name: Cache Poetry envs
       uses: actions/cache@v4
@@ -56,13 +52,13 @@ jobs:
     - name: Install dependencies
       run: poetry install --with dev
 
-    # ─────────────────────────────────────  Lint & Test  ─────────────────────────────────── #
+    # ────────────────────────  Lint & Test  ──────────────────────────── #
     - name: Lint & test
       run: |
         poetry run black --check .
         poetry run flake8 .
         poetry run pytest -q --cov=polyfuseql --cov-report=xml
 
-    # ────────────────────────────────  Upload coverage to Codecov  ───────────────────────── #
+    # ────────────────────  Upload coverage to Codecov  ───────────────── #
     - name: Upload coverage
       uses: codecov/codecov-action@v4
