@@ -3,5 +3,8 @@
   <component name="Black">
     <option name="sdkName" value="PolyFuseQL" />
   </component>
-  <component name="ProjectRootManager" version="2" project-jdk-name="PolyFuseQL" project-jdk-type="Python SDK" />
+  <component name="ProjectRootManager" version="2" project-jdk-name="Python 3.12 virtualenv at ~/Insync/luis.andradec14@gmail.com/Google Drive/MAESTRIA/TESIS/PolyFuseQL/.venv" project-jdk-type="Python SDK" />
+  <component name="PythonCompatibilityInspectionAdvertiser">
+    <option name="version" value="3" />
+  </component>
 </project>
