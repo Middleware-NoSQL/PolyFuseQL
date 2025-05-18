@@ -9,32 +9,17 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
-    # use docker-compose instead of individual service blocks
-    services:
-      compose:
-        image: docker/compose:debian-1.29  # tiny wrapper image with docker-compose
-        options: >-
-          -v /var/run/docker.sock:/var/run/docker.sock
-          -v ${{ github.workspace }}:/workspace
-        env:
-          COMPOSE_DOCKER_CLI_BUILD: 1
-        command: >
-          sh -c "
-            cd /workspace &&
-            docker-compose up -d &&
-            docker-compose ps
-          "
-
     steps:
+      # ---------- checkout ----------
       - uses: actions/checkout@v4
 
+      # ---------- Python + Poetry ----------
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: 'pip'
 
-      # ---------- cache Poetry virtualenv ----------
-      - name: Cache Poetry
+      - name: Cache Poetry envs
         uses: actions/cache@v4
         with:
           path: |
@@ -49,15 +34,27 @@ jobs:
           pip install -U pip
           pip install poetry
 
-      - name: Install dependencies
+      # ---------- Docker Compose stack ----------
+      - name: Install docker-compose v2
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y docker-compose-plugin   # provides `docker compose`
+
+      - name: Launch DB stack
+        run: |
+          docker compose version          # verify plugin
+          docker compose up -d            # uses repo's docker-compose.yml
+
+      # optional: quick check that services are healthy
+      - name: Show compose status
+        run: |
+          docker compose ps
+          docker compose logs --tail=50
+
+      # ---------- install deps ----------
+      - name: Install project dependencies
         run: |
           poetry install --with dev
-
-      # ---------- wait for healthchecks ----------
-      - name: Wait for DBs to be healthy
-        run: |
-          docker-compose ps
-          docker-compose logs --no-color postgres redis neo4j
 
       # ---------- lint & tests ----------
       - name: Lint & test
@@ -66,7 +63,6 @@ jobs:
           poetry run flake8 .
           poetry run pytest -q --cov=polyfuseql --cov-report=xml
 
-      # ---------- coverage upload ----------
+      # ---------- coverage ----------
       - name: Upload coverage
         uses: codecov/codecov-action@v4
-
