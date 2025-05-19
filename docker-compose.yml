@@ -1,22 +1,86 @@
+# docker-compose.yml  –  Northwind stack
+# Works with Compose v2 (Docker CLI plugin)
+
+volumes:
+  postgres-data:
+  redis-data:
+  neo4j-data:
+  export-data:
+
 services:
-# ──────────────  PostgreSQL  ────────────── #
+# ───────────── PostgreSQL ───────────── #
   postgres:
     image: postgres:16-alpine
     container_name: pg_northwind
     environment:
-      POSTGRES_DB: northwind
-      POSTGRES_USER: northwind
+      POSTGRES_DB:       northwind
+      POSTGRES_USER:     northwind
       POSTGRES_PASSWORD: northwind
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./docker/postgres/init:/docker-entrypoint-initdb.d   # 01_northwind.sql
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d   # 01_northwind_mod.sql ONLY
+      - export-data:/export
     ports: ["5432:5432"]
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "northwind"]
       interval: 5s
       retries: 10
 
-# ────────────────  Redis  ──────────────── #
+# ────────── JSON + seed.redis exporter (one-shot) ────────── #
+  pg-export:
+    image: postgres:16-alpine
+    container_name: pg_export
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST:     postgres
+      PGUSER:     northwind
+      PGPASSWORD: northwind
+      PGDATABASE: northwind
+    volumes:
+      - export-data:/export
+      - ./docker/redis/init:/seed:ro      # <-- mount build_seed.sh here
+    entrypoint:
+      - sh
+      - -euc
+      - |
+        echo "⏳  Dumping tables → northwind.json"
+
+        # ---- build the full JSON in one go ----
+        psql -q -v ON_ERROR_STOP=1 -Aqt \
+          -o /export/northwind.json \
+          -c "
+        SELECT jsonb_pretty(
+          jsonb_build_object(
+            'Category',             (SELECT jsonb_agg(row_to_json(t)) FROM \"Category\" t),
+            'Customer',             (SELECT jsonb_agg(row_to_json(t)) FROM \"Customer\" t),
+            'CustomerCustomerDemo', (SELECT jsonb_agg(row_to_json(t)) FROM \"CustomerCustomerDemo\" t),
+            'CustomerDemographics', (SELECT jsonb_agg(row_to_json(t)) FROM \"CustomerDemographics\" t),
+            'Employee',             (SELECT jsonb_agg(row_to_json(t)) FROM \"Employee\" t),
+            'EmployeeTerritory',    (SELECT jsonb_agg(row_to_json(t)) FROM \"EmployeeTerritory\" t),
+            'Order',                (SELECT jsonb_agg(row_to_json(t)) FROM \"Order\" t),
+            'OrderDetails',         (SELECT jsonb_agg(row_to_json(t)) FROM \"OrderDetails\" t),
+            'Product',              (SELECT jsonb_agg(row_to_json(t)) FROM \"Product\" t),
+            'Region',               (SELECT jsonb_agg(row_to_json(t)) FROM \"Region\" t),
+            'Shipper',              (SELECT jsonb_agg(row_to_json(t)) FROM \"Shipper\" t),
+            'Supplier',             (SELECT jsonb_agg(row_to_json(t)) FROM \"Supplier\" t),
+            'Territory',            (SELECT jsonb_agg(row_to_json(t)) FROM \"Territory\" t),
+            'USState',              (SELECT jsonb_agg(row_to_json(t)) FROM \"USState\" t)
+          )
+        );
+        "
+        echo "✅  /export/northwind.json created"
+
+        echo "⏳  Installing jq and converting to seed.redis"
+        apk add --no-cache jq >/dev/null
+
+        /seed/build_seed.sh /export/northwind.json /export/seed.redis \
+          || { echo "⚠️  build_seed failed"; exit 1; }
+
+        echo "✅  seed.redis created ($(wc -l < /export/seed.redis) lines)"
+
+# ───────────── Redis ───────────── #
   redis:
     image: redis:7-alpine
     container_name: redis_kv
@@ -34,23 +98,25 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      pg-export:
+        condition: service_completed_successfully
     volumes:
-      - ./docker/redis/init:/seed
+      - export-data:/export
       - redis-data:/data
-    entrypoint: >
-      sh -c "apk add --no-cache jq >/dev/null &&
-             /seed/fetch.sh &&
-             if [ ! -f /data/.seed_done ]; then
-               echo '⏳  Seeding Redis';
-               redis-cli -h redis -p 6379 < /seed/seed.redis &&
-               touch /data/.seed_done &&
-               echo '✅  Redis seeded';
-             else
-               echo 'ℹ️  Redis already seeded';
-             fi"
-  
+    entrypoint:
+      - sh
+      - -c
+      - |
+        if [ ! -f /data/.seed_done ]; then
+          echo "⏳  Seeding Redis"
+          redis-cli -h redis -p 6379 < /export/seed.redis
+          touch /data/.seed_done
+          echo "✅  Redis seeded"
+        else
+          echo "ℹ️  Redis already seeded"
+        fi
 
-  # ────────────────  Neo4j  ──────────────── #
+# ───────────── Neo4j ───────────── #
   neo4j:
     image: neo4j:5-community
     container_name: neo4j_graph
@@ -61,28 +127,27 @@ services:
     volumes:
       - neo4j-data:/data
     ports:
-      - "7687:7687"   # Bolt
-      - "7474:7474"   # Browser
+      - "7687:7687"
+      - "7474:7474"
     healthcheck:
       test: ["CMD-SHELL", "cypher-shell -u neo4j -p password 'RETURN 1' || exit 1"]
       interval: 10s
       retries: 15
 
-  neo4j-seed:                        # one-shot: ejecuta *.cypher si BD vacía
+  neo4j-seed:
     image: neo4j:5-community
     depends_on:
       neo4j:
         condition: service_healthy
     volumes:
-      - ./docker/neo4j/init:/seed       # *.cypher iniciales
-      - neo4j-data:/data                # marcador .seed_done
-    entrypoint: >
-      sh -c "/seed/fetch.sh &&
-                 if [ ! -f /data/.seed_done ]; then
-                   cypher-shell -a bolt://neo4j:7687 -u neo4j -p password -f /seed/seed.cypher &&
-                   touch /data/.seed_done; fi"
-
-volumes:
-  postgres-data:
-  redis-data:
-  neo4j-data:
+      - ./docker/neo4j/init:/seed
+      - neo4j-data:/data
+    entrypoint:
+      - sh
+      - -c
+      - |
+        /seed/fetch.sh
+        if [ ! -f /data/.seed_done ]; then
+          cypher-shell -a bolt://neo4j:7687 -u neo4j -p password -f /seed/seed.cypher
+          touch /data/.seed_done
+        fi

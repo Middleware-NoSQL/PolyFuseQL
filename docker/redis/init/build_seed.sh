@@ -1,37 +1,40 @@
 #!/usr/bin/env sh
-# Convert northwind.json → seed.redis  (Customer + Product)
+# docker/redis/init/build_seed.sh
 set -euo pipefail
 
 err(){ printf >&2 "❌  %s\n" "$*"; exit 1; }
+
+# ensure jq is available
 command -v jq >/dev/null 2>&1 || err "jq not installed"
 
 JSON=${1:-/seed/northwind.json}
+SEED=${2:-/seed/seed.redis}
+
 [ -f "$JSON" ] || err "JSON file not found: $JSON"
 
-echo "🔎  Root keys: $(jq -c 'keys' "$JSON")" >&2
+echo "🔎  Root keys: $(jq -r 'keys[]' "$JSON" | paste -sd',' -)" >&2
 
-emit_set(){ echo "SET $1 '$(echo "$2" | jq -c '.')'"; }
+# Clear out old seed
+: > "$SEED"
 
-count_c=0; count_p=0
-CUST='.Customer[]?'
-PROD='.Product[]?'
+# For each table name
+jq -r 'keys[]' "$JSON" | while read -r table; do
+  # Iterate rows
+  jq -c --arg tbl "$table" '.[$tbl][]?' "$JSON" | while read -r row; do
+    # Build composite ID from all fields ending in "ID"
+    id=$(echo "$row" | jq -r 'to_entries
+                              | map(select(.key|test("ID$"))|(.value|tostring))
+                              | join(":")')
+    [ -z "$id" ] && continue
 
-# ── Customers ────────────────────────────────────────────
-jq -c "$CUST" "$JSON" | while read -r row; do
-  id=$(echo "$row" | jq -r '
-        .customerId // .CustomerID // .entityId // .id // empty')
-  [ -z "$id" ] && continue
-  emit_set "customer:${id}" "$row"
-  count_c=$((count_c+1))
+    # Build HMSET args: key1 val1 key2 val2 …
+    args=$(echo "$row" | jq -r 'to_entries
+                                | map("\(.key) \(.value|@sh)")
+                                | join(" ")')
+
+    echo "HMSET $table:$id $args" >> "$SEED"
+  done
 done
 
-# ── Products ─────────────────────────────────────────────
-jq -c "$PROD" "$JSON" | while read -r row; do
-  id=$(echo "$row" | jq -r '
-        .productId // .ProductID // .entityId // .id // empty')
-  [ -z "$id" ] && continue
-  emit_set "product:${id}" "$row"
-  count_p=$((count_p+1))
-done
-
-printf >&2 "✔️  Generated %d customers and %d products\n" "$count_c" "$count_p"
+lines=$(wc -l < "$SEED")
+echo "✅  $SEED created ($lines lines)" >&2
