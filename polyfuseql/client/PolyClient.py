@@ -1,31 +1,25 @@
-"""polyfuseql core – thin async connectors and PolyClient façade.
+"""polyfuseql.client.PolyClient
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Unified façade that hides individual datastore connectors.
+This update adds a minimal *read‑only* SQL router using **sqlglot**.
+Supported grammar (MVP):
+    SELECT * FROM <table> WHERE <pkCol> = <literal>
 
-Public surface:
-    class PolyClient  –  async context‑manager holding three lightweight
-                        connectors (Postgres, Redis, Neo4j).
-
-Each connector exposes the minimal trio needed for the first TDD cycle:
-    • ping()   – sanity check the wire/credentials.
-    • count()  – number of entities of a logical type.
-    • get()    – fetch one entity by primary key, returning a Python dict.
-
-Assumes docker‑compose defaults:
-    postgres → host "postgres", db/user/pass "northwind" (port 5432)
-    redis    → host "redis", port 6379
-    neo4j    → bolt://neo4j:7687  user neo4j / password password
-
-The mapping from logical collection name to physical store is currently
-hard‑coded in _ROUTER; it will later be driven by SQLGlot parsing.
+If the table is not found in the in‑memory catalogue the query falls
+back to Postgres.
 """
 
-from typing import Dict, Tuple
+import json
+import os
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
 
 __all__ = [
-    "PostgresConnector",
-    "RedisConnector",
-    "Neo4jConnector",
     "PolyClient",
 ]
+
+import sqlglot
+from sqlglot import exp
 
 from polyfuseql.connector.Neo4j import Neo4jConnector
 from polyfuseql.connector.Postgres import PostgresConnector
@@ -44,18 +38,56 @@ _MAPPING: Dict[str, Tuple[str, str]] = {
 }
 
 
-# ─────────────────────────────  Facade client  ─────────────────────────── #
+# ---------------------------------------------------------------------------
+# PolyClient
+# ---------------------------------------------------------------------------
 class PolyClient:
-    """Route logical entities to physical back‑ends.
-    "">>> c = PolyClient()
-    "">>> await c.count("customers")
-    91
-    """
+    """Facade that exposes unified helpers plus a tiny SQL router."""
 
-    def __init__(self) -> None:
+    # ---------------------------------------------------------------------
+    # construction / catalogue
+    # ---------------------------------------------------------------------
+
+    def __init__(self, mapping_path: str | Path | None = None) -> None:
         self.pg = PostgresConnector()
         self.rd = RedisConnector()
         self.nj = Neo4jConnector()
+
+        self._catalogue: Dict[str, Tuple[str, str]] = {}
+        self._load_mapping(mapping_path)
+
+    # .................................................................
+    # internal: mapping loader
+    # .................................................................
+
+    def _load_mapping(self, mapping_path: str | Path | None) -> None:
+        """Populate ``self._catalogue`` with table → (backend, pkColumn).
+
+        Order of precedence:
+        1. *mapping_path* arg if provided.
+        2. ``$POLYFUSEQL_MAPPING`` env‑var.
+        3. Built‑in defaults.
+        """
+        path: Path | None = None
+        if mapping_path:
+            path = Path(mapping_path)
+        elif os.getenv("POLYFUSEQL_MAPPING"):
+            path = Path(os.environ["POLYFUSEQL_MAPPING"])
+
+        if path and path.exists():
+            data = json.loads(path.read_text())
+            for tbl, spec in data.items():
+                self._catalogue[tbl.lower()] = (spec["backend"], spec["pk"])
+        else:
+            # built‑in minimal mapping
+            self._catalogue.update(
+                {
+                    "customers": ("redis", "customerId"),
+                    "products": ("pg", "productId"),
+                    "customer": ("neo4j", "customerId"),  # node label
+                    "product": ("neo4j", "productId"),
+                }
+            )
 
     async def count(self, logical: str, backend: str = "") -> int:
         if not backend:
@@ -87,3 +119,63 @@ class PolyClient:
             case _:
                 raise ValueError("Unknown backend")
         return obj
+
+        # ---------------------------------------------------------------------
+        # NEW: SQL router  (MVP)
+        # ---------------------------------------------------------------------
+
+    async def query(self, sql: str) -> List[Dict[str, Any]]:
+        """Parse *SELECT \\* FROM tbl WHERE pk = literal* and delegate.
+
+        Returns a list of dict rows (empty if no match).
+        Raises *NotImplementedError* when query is outside the MVP subset.
+        """
+        ast = sqlglot.parse_one(sql, dialect="mysql")
+        print("ast args", ast.args)
+        # 1. accept *only* SELECT *
+        if not isinstance(ast, exp.Select):
+            raise NotImplementedError("Only SELECT supported at this stage")
+        if ast.expressions and not (
+            len(ast.expressions) == 1 and ast.expressions[0].is_star
+        ):
+            msg = "Only SELECT * supported (projections TBD)"
+            raise NotImplementedError(msg)
+
+        # 2. extract table
+        table_expr = ast.find(exp.Table)
+        if not table_expr:
+            raise NotImplementedError("No table found in query")
+        table = table_expr.name.lower()
+
+        # 3. extract simple equality predicate
+        where_expr = ast.args.get("where")
+
+        #  sqlglot parses `WHERE …` as       Where(this=<expression>)
+        #  we want the <expression> itself.
+        if isinstance(where_expr, exp.Where):
+            where_expr = where_expr.this
+        if not isinstance(where_expr, exp.EQ):
+            raise NotImplementedError("Need WHERE pk = literal predicate")
+        col_expr = where_expr.left  # Column(...)
+        lit_expr = where_expr.right  # Literal or Identifier
+        if not isinstance(col_expr, exp.Column) or not isinstance(
+            lit_expr, (exp.Literal, exp.Identifier)
+        ):
+            raise NotImplementedError("Unsupported predicate components")
+        pk_col = col_expr.name
+        pk_val = lit_expr.this  # unquoted literal from sqlglot
+
+        # 4. catalogue lookup or fallback
+        backend, expected_pk = self._catalogue.get(table, ("pg", pk_col))
+        if pk_col.lower() != expected_pk.lower():
+            raise NotImplementedError("Predicate column must be primary key")
+
+        # 5. delegate to connectors
+        if backend == "redis":
+            row = await self.rd.get(table.rstrip("s"), pk_val)
+        elif backend == "neo4j":
+            row = await self.nj.get(table.rstrip("s"), pk_val)
+        else:  # postgres default
+            row = await self.pg.get(table, pk_val)
+
+        return [row] if row else []

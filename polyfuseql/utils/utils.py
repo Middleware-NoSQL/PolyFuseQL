@@ -4,6 +4,10 @@ import re
 from typing import Dict, Any
 
 
+def _upper_first(s: str) -> str:
+    return s[0].upper() + s[1:] if s else s
+
+
 def _camelize(name: str) -> str:
     """Convert snake_case to camelCase (naïve)."""
     result = ""
