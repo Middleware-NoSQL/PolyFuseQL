@@ -82,19 +82,33 @@ services:
 
 # ───────────── Redis ───────────── #
   redis:
-    image: redis:7-alpine
+    image: redis/redis-stack:latest       # ← use Redis Stack for JSON
     container_name: redis_kv
-    command: ["redis-server", "--save", ""]
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --requirepass
+      - northwind
+      - --protected-mode
+      - "no"
     volumes:
       - redis-data:/data
-    ports: ["6379:6379"]
+    ports: [ "6379:6379" ]
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test:
+        [
+          "CMD",
+          "redis-cli",
+          "-a",
+          "northwind",
+          "ping",
+        ]
       interval: 5s
       retries: 10
 
   redis-seed:
-    image: redis:7-alpine
+    image: redis/redis-stack:latest       # ← same here
     depends_on:
       redis:
         condition: service_healthy
@@ -103,13 +117,21 @@ services:
     volumes:
       - export-data:/export
       - redis-data:/data
+      - ./docker/redis/init:/seed:ro       # ← mount build_seed.sh here
     entrypoint:
       - sh
-      - -c
+      - -euc
       - |
         if [ ! -f /data/.seed_done ]; then
-          echo "⏳  Seeding Redis"
-          redis-cli -h redis -p 6379 < /export/seed.redis
+          echo "→  Converting to seed.redis"
+          # Install jq via apt-get (Debian base)
+          apt-get update -qq \
+            && apt-get install -y -qq jq \
+            || { echo "⚠️  failed to install jq"; exit 1; }
+          /seed/build_seed.sh /export/northwind.json /export/seed.redis \
+            || { echo "⚠️  build_seed failed"; exit 1; }
+          echo "⏳  Loading into Redis"
+          redis-cli -h redis -p 6379 -a northwind < /export/seed.redis
           touch /data/.seed_done
           echo "✅  Redis seeded"
         else
