@@ -1,22 +1,23 @@
 # ---------------------------------------------------------------------------
 # Connectors (very thin) – open/close per call for simplicity
 # ---------------------------------------------------------------------------
+import json
 import logging
 
 from typing import Dict, Any
 
 import asyncpg
 
-from polyfuseql.utils.utils import _camelize_keys, _env
+from polyfuseql.utils.utils import _camelize_keys, env
 
 
 class PostgresConnector:
     def __init__(self) -> None:
-        self._host = _env("POSTGRES_HOST", "localhost")
-        self._port = int(_env("POSTGRES_PORT", "5432"))
-        self._user = _env("POSTGRES_USER", "northwind")
-        self._password = _env("POSTGRES_PASSWORD", "northwind")
-        self._database = _env("POSTGRES_DB", "northwind")
+        self._host = env("POSTGRES_HOST", "localhost")
+        self._port = int(env("POSTGRES_PORT", "5432"))
+        self._user = env("POSTGRES_USER", "northwind")
+        self._password = env("POSTGRES_PASSWORD", "northwind")
+        self._database = env("POSTGRES_DB", "northwind")
 
     async def _connect(self) -> asyncpg.Connection:
         return await asyncpg.connect(
@@ -46,14 +47,19 @@ class PostgresConnector:
             await conn.close()
 
     async def get(self, table: str, pk: str) -> Dict[str, Any]:
-        pk_col = "customer_id" if table == "customers" else "productid"
+        pk_col = "customer_id" if table == "customers" else "product_id"
         conn = await self._connect()
         try:
             query = f"SELECT row_to_json(t) FROM {table} t WHERE {pk_col} = $1"
-            logging.log(logging.INFO, "GET BEFORE AWAIT" + query)
-            row = await conn.fetchval(query, pk)
-            logging.log(logging.INFO, "GET AFTER AWAIT" + row)
-            logging.log(logging.INFO, "GET AFTER AWAIT" + str(type(row)))
+            print("GET BEFORE AWAIT" + query)
+            if pk.isdigit():
+                pk_val = int(pk)
+            else:
+                pk_val = pk
+            row = await conn.fetchrow(query, pk_val)
+            print("GET AFTER AWAIT" + str(row))
+            print("GET AFTER AWAIT" + str(type(row)))
+            row = json.loads(row.get("row_to_json"))
             return _camelize_keys(row) if row else {}
         finally:
             await conn.close()

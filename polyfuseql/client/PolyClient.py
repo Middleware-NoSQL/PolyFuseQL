@@ -18,7 +18,7 @@ The mapping from logical collection name to physical store is currently
 hard‑coded in _ROUTER; it will later be driven by SQLGlot parsing.
 """
 
-from typing import Any, Dict, Tuple
+from typing import Dict, Tuple
 
 __all__ = [
     "PostgresConnector",
@@ -57,8 +57,10 @@ class PolyClient:
         self.rd = RedisConnector()
         self.nj = Neo4jConnector()
 
-    async def count(self, logical: str) -> int:
-        backend, source = _MAPPING[logical]
+    async def count(self, logical: str, backend: str = "") -> int:
+        if not backend:
+            backend, source = _MAPPING[logical]
+        source = logical
         print(backend, source)
         match backend:
             case "pg":
@@ -70,8 +72,11 @@ class PolyClient:
             case _:
                 raise ValueError(f"Unknown backend: {backend}")
 
-    async def get(self, logical: str, pk: str) -> Dict[str, Any]:
-        backend, source = _MAPPING[logical]
+    async def get(self, logical: str, pk: str, backend: str = "") -> Dict:
+        if not backend:
+            backend, source = _MAPPING[logical]
+        source = logical
+        print(backend, source)
         match backend:
             case "pg":
                 obj = await self.pg.get(source, pk)

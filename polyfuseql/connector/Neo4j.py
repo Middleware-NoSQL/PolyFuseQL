@@ -2,15 +2,15 @@ from typing import Dict, Any
 
 from neo4j import AsyncGraphDatabase
 
-from polyfuseql.utils.utils import _env
+from polyfuseql.utils.utils import env
 
 
 class Neo4jConnector:
     def __init__(self) -> None:
-        host = _env("NEO4J_HOST", "localhost")
-        port = _env("NEO4J_PORT", "7687")
-        user = _env("NEO4J_USER", "neo4j")
-        password = _env("NEO4J_PASSWORD", "password")
+        host = env("NEO4J_HOST", "localhost")
+        port = env("NEO4J_PORT", "7687")
+        user = env("NEO4J_USER", "neo4j")
+        password = env("NEO4J_PASSWORD", "password")
         uri = f"bolt://{host}:{port}"
         self._driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
 
@@ -27,22 +27,28 @@ class Neo4jConnector:
             return rec["n"]
 
     async def get(self, label: str, pk: str) -> Dict[str, Any]:
-        async with self._driver.session() as s:
-            query_customers = (
-                f"MATCH (n:{label.capitalize()} "
-                f"{{customerId: $id}}) "
-                f"RETURN properties(n) AS p"
-            )
-            query_productors = (
-                f"MATCH (n:{label.capitalize()} "
-                f"{{productId: $id}}) "
-                f"RETURN properties(n) AS p"
-            )
-            if label == "customers":
-                cypher = query_customers
-            else:
-                cypher = query_productors
+        """Fetch one node by its *possible* primary‑key property.
 
-            result = await s.run(cypher, id=pk)
-            rec = await result.single()
-            return rec["p"] if rec else {}
+        The seed dataset is inconsistent (`customerId` vs `CustomerID` vs
+        `entityId`).  Try a list of candidate property names until a match
+        is found.  Returns an empty dict if nothing matches.
+        """
+        prop_candidates = [
+            f"{label}Id",  # customerId / productId
+            f"{label}ID",  # customerID / productID
+            "CustomerID",
+            "ProductID",  # specific Northwind convention
+            "entityId",
+            "id",
+        ]
+
+        async with self._driver.session() as s:
+            for prop in prop_candidates:
+                cypher = (
+                    f"MATCH (n:{label.capitalize()}) "
+                    f"WHERE n.{prop} = $id RETURN properties(n) AS p LIMIT 1"
+                )
+                rec = await (await s.run(cypher, id=pk)).single()
+                if rec and rec["p"]:
+                    return rec["p"]
+        return {}

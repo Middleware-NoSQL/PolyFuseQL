@@ -24,7 +24,7 @@ def camelize_dict(d: Dict[str, Any]) -> Dict[str, Any]:
     return {_camelize(k): v for k, v in d.items()}
 
 
-def _env(name: str, default: str | None = None) -> str | None:  # small shorth.
+def env(name: str, default: str | None = None) -> str | None:  # small shorth.
     return os.environ.get(name, default)
 
 
