@@ -8,86 +8,29 @@ volumes:
   export-data:
 
 services:
-# ───────────── PostgreSQL ───────────── #
+# ──────────────  PostgreSQL  ────────────── #
   postgres:
     image: postgres:16-alpine
     container_name: pg_northwind
     environment:
-      POSTGRES_DB:       northwind
-      POSTGRES_USER:     northwind
+      POSTGRES_DB: northwind
+      POSTGRES_USER: northwind
       POSTGRES_PASSWORD: northwind
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./docker/postgres/init:/docker-entrypoint-initdb.d   # 01_northwind_mod.sql ONLY
-      - export-data:/export
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d   # 01_northwind.sql.sql
     ports: ["5432:5432"]
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "northwind"]
       interval: 5s
       retries: 10
 
-# ────────── JSON + seed.redis exporter (one-shot) ────────── #
-  pg-export:
-    image: postgres:16-alpine
-    container_name: pg_export
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      PGHOST:     postgres
-      PGUSER:     northwind
-      PGPASSWORD: northwind
-      PGDATABASE: northwind
-    volumes:
-      - export-data:/export
-      - ./docker/redis/init:/seed:ro      # <-- mount build_seed.sh here
-    entrypoint:
-      - sh
-      - -euc
-      - |
-        echo "⏳  Dumping tables → northwind.json"
-
-        # ---- build the full JSON in one go ----
-        psql -q -v ON_ERROR_STOP=1 -Aqt \
-          -o /export/northwind.json \
-          -c "
-        SELECT jsonb_pretty(
-          jsonb_build_object(
-            'Category',             (SELECT jsonb_agg(row_to_json(t)) FROM \"Category\" t),
-            'Customer',             (SELECT jsonb_agg(row_to_json(t)) FROM \"Customer\" t),
-            'CustomerCustomerDemo', (SELECT jsonb_agg(row_to_json(t)) FROM \"CustomerCustomerDemo\" t),
-            'CustomerDemographics', (SELECT jsonb_agg(row_to_json(t)) FROM \"CustomerDemographics\" t),
-            'Employee',             (SELECT jsonb_agg(row_to_json(t)) FROM \"Employee\" t),
-            'EmployeeTerritory',    (SELECT jsonb_agg(row_to_json(t)) FROM \"EmployeeTerritory\" t),
-            'Order',                (SELECT jsonb_agg(row_to_json(t)) FROM \"Order\" t),
-            'OrderDetails',         (SELECT jsonb_agg(row_to_json(t)) FROM \"OrderDetails\" t),
-            'Product',              (SELECT jsonb_agg(row_to_json(t)) FROM \"Product\" t),
-            'Region',               (SELECT jsonb_agg(row_to_json(t)) FROM \"Region\" t),
-            'Shipper',              (SELECT jsonb_agg(row_to_json(t)) FROM \"Shipper\" t),
-            'Supplier',             (SELECT jsonb_agg(row_to_json(t)) FROM \"Supplier\" t),
-            'Territory',            (SELECT jsonb_agg(row_to_json(t)) FROM \"Territory\" t),
-            'USState',              (SELECT jsonb_agg(row_to_json(t)) FROM \"USState\" t)
-          )
-        );
-        "
-        echo "✅  /export/northwind.json created"
-
-        echo "⏳  Installing jq and converting to seed.redis"
-        apk add --no-cache jq >/dev/null
-
-        /seed/build_seed.sh /export/northwind.json /export/seed.redis \
-          || { echo "⚠️  build_seed failed"; exit 1; }
-
-        echo "✅  seed.redis created ($(wc -l < /export/seed.redis) lines)"
-
 # ───────────── Redis ───────────── #
   redis:
     image: redis/redis-stack:latest       # ← use Redis Stack for JSON
     container_name: redis_kv
     command:
-      - redis-server
-      - --save
-      - ""
+      - redis-stack-server
       - --requirepass
       - northwind
       - --protected-mode
@@ -97,13 +40,7 @@ services:
     ports: [ "6379:6379" ]
     healthcheck:
       test:
-        [
-          "CMD",
-          "redis-cli",
-          "-a",
-          "northwind",
-          "ping",
-        ]
+        ["CMD", "redis-cli", "-a", "northwind", "ping"]
       interval: 5s
       retries: 10
 
@@ -112,26 +49,21 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      pg-export:
-        condition: service_completed_successfully
     volumes:
       - export-data:/export
       - redis-data:/data
-      - ./docker/redis/init:/seed:ro       # ← mount build_seed.sh here
+      - ./docker/redis/init:/seed      # ← mount build_seed.sh here
     entrypoint:
       - sh
       - -euc
       - |
         if [ ! -f /data/.seed_done ]; then
           echo "→  Converting to seed.redis"
-          # Install jq via apt-get (Debian base)
-          apt-get update -qq \
-            && apt-get install -y -qq jq \
-            || { echo "⚠️  failed to install jq"; exit 1; }
-          /seed/build_seed.sh /export/northwind.json /export/seed.redis \
-            || { echo "⚠️  build_seed failed"; exit 1; }
+          apt-get update -qq && apt-get install -y -qq jq wget
+          /seed/fetch.sh
+          /seed/build_seed.sh /seed/northwind.json /seed/seed.redis
           echo "⏳  Loading into Redis"
-          redis-cli -h redis -p 6379 -a northwind < /export/seed.redis
+          redis-cli -h redis -p 6379 -a northwind < /seed/seed.redis
           touch /data/.seed_done
           echo "✅  Redis seeded"
         else
