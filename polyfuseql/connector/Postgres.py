@@ -7,12 +7,14 @@ import logging
 from typing import Dict, Any
 
 import asyncpg
-
+from polyfuseql.connector.Connector import Connector
 from polyfuseql.utils.utils import _camelize_keys, env
 
 
-class PostgresConnector:
-    def __init__(self) -> None:
+class PostgresConnector(Connector):
+    def __init__(self, options: Dict = None) -> None:
+        super().__init__(options)
+        self._options = options
         self._host = env("POSTGRES_HOST", "localhost")
         self._port = int(env("POSTGRES_PORT", "5432"))
         self._user = env("POSTGRES_USER", "northwind")

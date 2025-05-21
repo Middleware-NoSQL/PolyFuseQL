@@ -12,7 +12,7 @@ back to Postgres.
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Union, Sequence
 
 __all__ = [
     "PolyClient",
@@ -21,9 +21,8 @@ __all__ = [
 import sqlglot
 from sqlglot import exp
 
-from polyfuseql.connector.Neo4j import Neo4jConnector
-from polyfuseql.connector.Postgres import PostgresConnector
-from polyfuseql.connector.Redis import RedisConnector
+from polyfuseql.catalogue.Catalogue import Catalogue
+from polyfuseql.connector.ConnectorFactory import ConnectorFactory
 
 # ────────────────────────────────  Router  ────────────────────────────── #
 # logical_name → (engine_attr_on_client, concrete_name_in_store)
@@ -48,13 +47,20 @@ class PolyClient:
     # construction / catalogue
     # ---------------------------------------------------------------------
 
-    def __init__(self, mapping_path: str | Path | None = None) -> None:
-        self.pg = PostgresConnector()
-        self.rd = RedisConnector()
-        self.nj = Neo4jConnector()
+    def __init__(self, options: Dict = None) -> None:
+        self.options = options
+        self.pg = ConnectorFactory.create_connector("postgres", options)
+        self.rd = ConnectorFactory.create_connector("redis", options)
+        self.nj = ConnectorFactory.create_connector("neo4j", options)
 
-        self._catalogue: Dict[str, Tuple[str, str]] = {}
-        self._load_mapping(mapping_path)
+        self._catalogue: Catalogue = Catalogue()
+
+        self.backends = {
+            "pg": self.pg,
+            "postgres": self.pg,
+            "redis": self.rd,
+            "neo4j": self.nj,
+        }
 
     # .................................................................
     # internal: mapping loader
@@ -109,30 +115,29 @@ class PolyClient:
             backend, source = _MAPPING[logical]
         source = logical
         print(backend, source)
-        match backend:
-            case "pg":
-                obj = await self.pg.get(source, pk)
-            case "redis":
-                obj = await self.rd.get(source, pk)
-            case "neo4j":
-                obj = await self.nj.get(source, pk)
-            case _:
-                raise ValueError("Unknown backend")
+        conn = self.backends.get(backend)
+        if not conn:
+            raise ValueError(f"Unknown backend '{backend}'")
+        obj = await conn.get(source, pk)
         return obj
 
         # ---------------------------------------------------------------------
         # NEW: SQL router  (MVP)
         # ---------------------------------------------------------------------
 
-    async def query(self, sql: str) -> List[Dict[str, Any]]:
-        """Parse *SELECT \\* FROM tbl WHERE pk = literal* and delegate.
-
-        Returns a list of dict rows (empty if no match).
-        Raises *NotImplementedError* when query is outside the MVP subset.
+    def query_parse_validate_grammar(self, sql: str) -> Tuple | None:
         """
+        Analyzes and validates the SQL query.
+        Parameters
+        ----------
+        sql : str
+            SQL statement – only a limited subset is supported.
+        """
+        # ------------------------------------------------------------------
+        # 1. Parse & validate grammar subset
+        # ------------------------------------------------------------------
         ast = sqlglot.parse_one(sql, dialect="mysql")
-        print("ast args", ast.args)
-        # 1. accept *only* SELECT *
+
         if not isinstance(ast, exp.Select):
             raise NotImplementedError("Only SELECT supported at this stage")
         if ast.expressions and not (
@@ -141,41 +146,94 @@ class PolyClient:
             msg = "Only SELECT * supported (projections TBD)"
             raise NotImplementedError(msg)
 
-        # 2. extract table
-        table_expr = ast.find(exp.Table)
-        if not table_expr:
+        # Table name
+        tbl_expr = ast.find(exp.Table)
+        if not tbl_expr:
             raise NotImplementedError("No table found in query")
-        table = table_expr.name.lower()
+        table = tbl_expr.name.lower()
 
-        # 3. extract simple equality predicate
+        # WHERE pk = literal predicate
         where_expr = ast.args.get("where")
-
-        #  sqlglot parses `WHERE …` as       Where(this=<expression>)
-        #  we want the <expression> itself.
         if isinstance(where_expr, exp.Where):
             where_expr = where_expr.this
         if not isinstance(where_expr, exp.EQ):
-            raise NotImplementedError("Need WHERE pk = literal predicate")
-        col_expr = where_expr.left  # Column(...)
-        lit_expr = where_expr.right  # Literal or Identifier
-        if not isinstance(col_expr, exp.Column) or not isinstance(
-            lit_expr, (exp.Literal, exp.Identifier)
-        ):
-            raise NotImplementedError("Unsupported predicate components")
+            raise NotImplementedError("Require WHERE pk = literal predicate")
+        col_expr, lit_expr = where_expr.left, where_expr.right
+        if not isinstance(col_expr, exp.Column):
+            raise NotImplementedError("Unsupported left-hand expression")
+        if not isinstance(lit_expr, (exp.Literal, exp.Identifier)):
+            raise NotImplementedError("Unsupported literal type")
         pk_col = col_expr.name
-        pk_val = lit_expr.this  # unquoted literal from sqlglot
+        pk_val = lit_expr.this  # unquoted value
 
-        # 4. catalogue lookup or fallback
-        backend, expected_pk = self._catalogue.get(table, ("pg", pk_col))
+        return table, pk_col, pk_val
+
+    def set_backends(
+        self,
+        table: str,
+        pk_col: str,
+        engines: Union[str, Sequence[str], None] = None,
+    ) -> list[str] | str | None:
+        """
+        Set the backends where the query will be executed.
+        Parameters
+        ----------
+        table : str
+            Table that will be queried.
+        pk_col : str
+            The primary key column of the table.
+        engines : Union[str, Sequence[str], None] = None
+            Expected engines to do the query
+        """
+        # ------------------------------------------------------------------
+        # 2. Decide backends
+        # ------------------------------------------------------------------
+        if engines is None:
+            catalogue = self._catalogue.get(table, ("postgres", pk_col))
+            backend, expected_pk = catalogue
+            backends = [backend]
+        else:
+            backends = [engines] if isinstance(engines, str) else list(engines)
+            expected_pk = pk_col  # assume caller knows predicate column
+
         if pk_col.lower() != expected_pk.lower():
             raise NotImplementedError("Predicate column must be primary key")
 
-        # 5. delegate to connectors
-        if backend == "redis":
-            row = await self.rd.get(table.rstrip("s"), pk_val)
-        elif backend == "neo4j":
-            row = await self.nj.get(table.rstrip("s"), pk_val)
-        else:  # postgres default
-            row = await self.pg.get(table, pk_val)
+        return backends
 
-        return [row] if row else []
+    async def query(
+        self,
+        sql: str,
+        *,
+        engines: Union[str, Sequence[str], None] = None,
+        include_source: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Execute *SELECT \\* FROM tbl WHERE pk = literal*
+        against one or many backends.
+
+        Parameters
+        ----------
+        sql : str
+            SQL statement – only a limited subset is supported.
+        engines : str | list[str] | None, optional
+            *None* → use the catalogue‑owner backend (default).
+            A backend name or list thereof → fan‑out query to each requested
+            backend (`"postgres"|"redis"|"neo4j"`).
+        include_source : bool, optional
+            When *True*, each returned dict gains a field ``"_source"`` with
+            the backend that produced the row.
+        """
+
+        table, pk_col, pk_val = self.query_parse_validate_grammar(sql)
+
+        backends = self.set_backends(table, pk_col, engines)
+
+        # ------------------------------------------------------------------
+        # 3. Fan‑out execution
+        # ------------------------------------------------------------------
+        conn = self.backends.get(backends[0])
+        if not conn:
+            raise ValueError(f"Unknown backend '{backends[0]}'")
+        row = await conn.get(table, pk_val)
+
+        return row
