@@ -54,3 +54,11 @@ class Neo4jConnector(Connector):
                 if rec and rec["p"]:
                     return rec["p"]
         return {}
+
+    async def insert(self, label: str, payload: Dict[str, Any]) -> Any:
+        props = ", ".join(f"{k}: ${k}" for k in payload.keys())
+        cypher = f"CREATE (n:{label.capitalize()} {{ {props} }}) RETURN n"
+        async with self._driver.session() as s:
+            result = await s.run(cypher, **payload)
+            rec = await result.single()
+            return rec["n"] if rec else {}

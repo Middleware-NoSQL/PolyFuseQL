@@ -65,3 +65,17 @@ class PostgresConnector(Connector):
             return _camelize_keys(row) if row else {}
         finally:
             await conn.close()
+
+    async def insert(self, table: str, payload: Dict[str, Any]) -> Any:
+        cols = ", ".join(payload.keys())
+        placeholders = ", ".join(f"${i + 1}" for i in range(len(payload)))
+        values = list(payload.values())
+
+        conn = await self._connect()
+        sql_query = f"INSERT INTO {table} ({cols}) VALUES ({placeholders})"
+        sql_query = sql_query + " RETURNING *"
+        try:
+            row = await conn.fetchrow(sql_query, *values)
+            return dict(row)
+        finally:
+            await conn.close()

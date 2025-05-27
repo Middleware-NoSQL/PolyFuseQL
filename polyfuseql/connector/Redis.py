@@ -86,3 +86,19 @@ class RedisConnector(Connector):
         async with self._redis() as r:
             raw = await r.json().get(key)
             return raw
+
+    async def insert(self, namespace: str, payload: Dict[str, Any]) -> Any:
+        key = f"{namespace}:{payload.get('id')}"
+        data_type = self._options.get("data_type", "")
+        error_msg = f"Unknown data type: {data_type}"
+        async with self._redis() as r:
+            match data_type:
+                case "string":
+                    await r.set(key, json.dumps(payload))
+                case "hash":
+                    await r.hset(key, mapping=payload)
+                case "json":
+                    await r.json().set(key, "$", payload)
+                case _:
+                    raise NotImplementedError(error_msg)
+        return {"status": "inserted", "key": key}

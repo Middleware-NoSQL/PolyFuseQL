@@ -18,3 +18,7 @@ class Connector(ABC):
     @abstractmethod
     async def get(self, entity: str, pk: str) -> Dict[str, Any]:
         pass
+
+    @abstractmethod
+    async def insert(self, entity: str, payload: Dict[str, Any]) -> Any:
+        pass
