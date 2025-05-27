@@ -1,0 +1,5 @@
+{
+  "customers": { "backend": "redis",  "pk": "customerId" },
+  "products" : { "backend": "postgres","pk": "productId" },
+  "customer" : { "backend": "neo4j",  "pk": "customerId" }
+}

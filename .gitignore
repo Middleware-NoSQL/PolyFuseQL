@@ -176,3 +176,5 @@ cython_debug/
 docker/**/init/*.json
 docker/**/init/*.cypher
 docker/**/init/*.redis
+/scripts/snapshot_20250518_212845.txt
+/snapshot_*_*.txt

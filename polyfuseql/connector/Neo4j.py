@@ -1,12 +1,14 @@
 from typing import Dict, Any
 
+from polyfuseql.connector.Connector import Connector
 from neo4j import AsyncGraphDatabase
 
 from polyfuseql.utils.utils import env
 
 
-class Neo4jConnector:
-    def __init__(self) -> None:
+class Neo4jConnector(Connector):
+    def __init__(self, options: Dict = None) -> None:
+        super().__init__(options)
         host = env("NEO4J_HOST", "localhost")
         port = env("NEO4J_PORT", "7687")
         user = env("NEO4J_USER", "neo4j")

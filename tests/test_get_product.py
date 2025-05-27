@@ -12,9 +12,26 @@ async def test_get_product_postgres():
 
 
 @pytest.mark.asyncio
-async def test_get_product_redis():
+async def test_get_product_redis_string_by_default():
     c = PolyClient()
-    doc = await c.get("product", "1", "redis")
+    doc = await c.get("Product", "1:1:1:string", "redis")
+    print("doc", doc)
+    assert doc["productName"] == "Product HHYDP"
+
+
+@pytest.mark.asyncio
+async def test_get_product_redis_hash():
+    c = PolyClient({"data_type": "hash"})
+    doc = await c.get("Product", "1:1:1:hash", "redis")
+    print("doc", doc)
+    assert doc["productName"] == "Product HHYDP"
+
+
+@pytest.mark.asyncio
+async def test_get_product_redis_json():
+    c = PolyClient({"data_type": "json"})
+    doc = await c.get("Product", "1:1:1:json", "redis")
+    print("doc", doc)
     assert doc["productName"] == "Product HHYDP"
 
 

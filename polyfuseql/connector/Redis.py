@@ -2,21 +2,32 @@ import json
 from contextlib import asynccontextmanager
 from typing import Dict, Any
 
+from polyfuseql.connector.Connector import Connector
 from polyfuseql.utils.utils import env
 import redis.asyncio as aioredis
 
 
-class RedisConnector:
-    def __init__(self) -> None:
+class RedisConnector(Connector):
+    def __init__(self, options: Dict = None) -> None:
+        super().__init__(options)
         self._host = env("REDIS_HOST", "localhost")
         self._port = int(env("REDIS_PORT", "6379"))
+        self._username = env("REDIS_USER", "northwind")
+        self._password = env("REDIS_PASSWORD", "northwind")
         self._client: aioredis.Redis | None = None
+        if options:
+            self._options = options
+        else:
+            self._options = {"data_type": "string"}
 
     @asynccontextmanager
     async def _redis(self):
         if not self._client:
             self._client = aioredis.Redis(
-                host=self._host, port=self._port, decode_responses=True
+                host=self._host,
+                port=self._port,
+                decode_responses=True,
+                password=self._password,
             )
         try:
             yield self._client
@@ -41,8 +52,37 @@ class RedisConnector:
         return total
 
     async def get(self, namespace: str, pk: str) -> Dict[str, Any]:
+        """
+        Accept a format like :json or :hash or :string
+        to get expected data type
+        :param namespace: expected namespace to connect
+        :param pk: identifier of the namespaced entity to get
+        :return: Dictionary with the values of the entity
+        """
         key = f"{namespace}:{pk}"
         print(key)
+        data_type = self._options.get("data_type", "")
+        match data_type:
+            case "string":
+                return await self.get_string(key)
+            case "hash":
+                return await self.get_hash(key)
+            case "json":
+                return await self.get_json(key)
+            case _:
+                raise NotImplementedError(f"Unknown data type: {data_type}")
+
+    async def get_string(self, key: str) -> Dict:
         async with self._redis() as r:
             raw = await r.get(key)
             return json.loads(raw) if raw else {}
+
+    async def get_hash(self, key: str) -> Dict | None:
+        async with self._redis() as r:
+            raw = await r.hgetall(key)
+            return raw
+
+    async def get_json(self, key: str) -> Dict:
+        async with self._redis() as r:
+            raw = await r.json().get(key)
+            return raw

@@ -1,5 +1,13 @@
+# docker-compose.yml – Northwind stack + SonarQube
+
+volumes:
+  postgres-data:
+  redis-data:
+  neo4j-data:
+  export-data:
+
 services:
-# ──────────────  PostgreSQL  ────────────── #
+  # ────────────── PostgreSQL ────────────── #
   postgres:
     image: postgres:16-alpine
     container_name: pg_northwind
@@ -9,48 +17,60 @@ services:
       POSTGRES_PASSWORD: northwind
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./docker/postgres/init:/docker-entrypoint-initdb.d   # 01_northwind.sql
-    ports: ["5432:5432"]
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "northwind"]
       interval: 5s
       retries: 10
 
-# ────────────────  Redis  ──────────────── #
+  # ────────────── Redis ────────────── #
   redis:
-    image: redis:7-alpine
+    image: redis/redis-stack:latest
     container_name: redis_kv
-    command: ["redis-server", "--save", ""]
+    command:
+      - redis-stack-server
+      - --requirepass
+      - northwind
+      - --protected-mode
+      - "no"
     volumes:
       - redis-data:/data
-    ports: ["6379:6379"]
+    ports:
+      - "6379:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "northwind", "ping"]
       interval: 5s
       retries: 10
 
   redis-seed:
-    image: redis:7-alpine
+    image: redis/redis-stack:latest
     depends_on:
       redis:
         condition: service_healthy
     volumes:
-      - ./docker/redis/init:/seed
+      - export-data:/export
       - redis-data:/data
-    entrypoint: >
-      sh -c "apk add --no-cache jq >/dev/null &&
-             /seed/fetch.sh &&
-             if [ ! -f /data/.seed_done ]; then
-               echo '⏳  Seeding Redis';
-               redis-cli -h redis -p 6379 < /seed/seed.redis &&
-               touch /data/.seed_done &&
-               echo '✅  Redis seeded';
-             else
-               echo 'ℹ️  Redis already seeded';
-             fi"
-  
+      - ./docker/redis/init:/seed
+    entrypoint:
+      - sh
+      - -euc
+      - |
+        if [ ! -f /data/.seed_done ]; then
+          echo "→  Converting to seed.redis"
+          apt-get update -qq && apt-get install -y -qq jq wget
+          /seed/fetch.sh
+          /seed/build_seed.sh /seed/northwind.json /seed/seed.redis
+          echo "⏳  Loading into Redis"
+          redis-cli -h redis -p 6379 -a northwind < /seed/seed.redis
+          touch /data/.seed_done
+          echo "✅  Redis seeded"
+        else
+          echo "ℹ️  Redis already seeded"
+        fi
 
-  # ────────────────  Neo4j  ──────────────── #
+  # ────────────── Neo4j ────────────── #
   neo4j:
     image: neo4j:5-community
     container_name: neo4j_graph
@@ -61,28 +81,27 @@ services:
     volumes:
       - neo4j-data:/data
     ports:
-      - "7687:7687"   # Bolt
-      - "7474:7474"   # Browser
+      - "7687:7687"
+      - "7474:7474"
     healthcheck:
       test: ["CMD-SHELL", "cypher-shell -u neo4j -p password 'RETURN 1' || exit 1"]
       interval: 10s
       retries: 15
 
-  neo4j-seed:                        # one-shot: ejecuta *.cypher si BD vacía
+  neo4j-seed:
     image: neo4j:5-community
     depends_on:
       neo4j:
         condition: service_healthy
     volumes:
-      - ./docker/neo4j/init:/seed       # *.cypher iniciales
-      - neo4j-data:/data                # marcador .seed_done
-    entrypoint: >
-      sh -c "/seed/fetch.sh &&
-                 if [ ! -f /data/.seed_done ]; then
-                   cypher-shell -a bolt://neo4j:7687 -u neo4j -p password -f /seed/seed.cypher &&
-                   touch /data/.seed_done; fi"
-
-volumes:
-  postgres-data:
-  redis-data:
-  neo4j-data:
+      - ./docker/neo4j/init:/seed
+      - neo4j-data:/data
+    entrypoint:
+      - sh
+      - -c
+      - |
+        /seed/fetch.sh
+        if [ ! -f /data/.seed_done ]; then
+          cypher-shell -a bolt://neo4j:7687 -u neo4j -p password -f /seed/seed.cypher
+          touch /data/.seed_done
+        fi
