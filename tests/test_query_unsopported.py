@@ -2,9 +2,8 @@
 import pytest
 from polyfuseql.client.PolyClient import PolyClient
 
-pytestmark = pytest.mark.asyncio
 
-
+@pytest.mark.asyncio
 async def test_query_unsupported():
     c = PolyClient()
     with pytest.raises(NotImplementedError):

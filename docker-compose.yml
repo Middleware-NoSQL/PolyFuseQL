@@ -1,5 +1,4 @@
-# docker-compose.yml  –  Northwind stack
-# Works with Compose v2 (Docker CLI plugin)
+# docker-compose.yml – Northwind stack + SonarQube
 
 volumes:
   postgres-data:
@@ -8,7 +7,7 @@ volumes:
   export-data:
 
 services:
-# ──────────────  PostgreSQL  ────────────── #
+  # ────────────── PostgreSQL ────────────── #
   postgres:
     image: postgres:16-alpine
     container_name: pg_northwind
@@ -18,16 +17,17 @@ services:
       POSTGRES_PASSWORD: northwind
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./docker/postgres/init:/docker-entrypoint-initdb.d   # 01_northwind.sql.sql
-    ports: ["5432:5432"]
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "northwind"]
       interval: 5s
       retries: 10
 
-# ───────────── Redis ───────────── #
+  # ────────────── Redis ────────────── #
   redis:
-    image: redis/redis-stack:latest       # ← use Redis Stack for JSON
+    image: redis/redis-stack:latest
     container_name: redis_kv
     command:
       - redis-stack-server
@@ -37,22 +37,22 @@ services:
       - "no"
     volumes:
       - redis-data:/data
-    ports: [ "6379:6379" ]
+    ports:
+      - "6379:6379"
     healthcheck:
-      test:
-        ["CMD", "redis-cli", "-a", "northwind", "ping"]
+      test: ["CMD", "redis-cli", "-a", "northwind", "ping"]
       interval: 5s
       retries: 10
 
   redis-seed:
-    image: redis/redis-stack:latest       # ← same here
+    image: redis/redis-stack:latest
     depends_on:
       redis:
         condition: service_healthy
     volumes:
       - export-data:/export
       - redis-data:/data
-      - ./docker/redis/init:/seed      # ← mount build_seed.sh here
+      - ./docker/redis/init:/seed
     entrypoint:
       - sh
       - -euc
@@ -70,7 +70,7 @@ services:
           echo "ℹ️  Redis already seeded"
         fi
 
-# ───────────── Neo4j ───────────── #
+  # ────────────── Neo4j ────────────── #
   neo4j:
     image: neo4j:5-community
     container_name: neo4j_graph

@@ -52,6 +52,13 @@ class RedisConnector(Connector):
         return total
 
     async def get(self, namespace: str, pk: str) -> Dict[str, Any]:
+        """
+        Accept a format like :json or :hash or :string
+        to get expected data type
+        :param namespace: expected namespace to connect
+        :param pk: identifier of the namespaced entity to get
+        :return: Dictionary with the values of the entity
+        """
         key = f"{namespace}:{pk}"
         print(key)
         data_type = self._options.get("data_type", "")

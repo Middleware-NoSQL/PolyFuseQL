@@ -12,7 +12,7 @@ back to Postgres.
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Union, Sequence
+from typing import Dict, List, Tuple, Union, Sequence
 
 __all__ = [
     "PolyClient",
@@ -150,7 +150,7 @@ class PolyClient:
         tbl_expr = ast.find(exp.Table)
         if not tbl_expr:
             raise NotImplementedError("No table found in query")
-        table = tbl_expr.name.lower()
+        table = tbl_expr.name
 
         # WHERE pk = literal predicate
         where_expr = ast.args.get("where")
@@ -201,13 +201,7 @@ class PolyClient:
 
         return backends
 
-    async def query(
-        self,
-        sql: str,
-        *,
-        engines: Union[str, Sequence[str], None] = None,
-        include_source: bool = False,
-    ) -> List[Dict[str, Any]]:
+    async def query(self, sql: str, *, engine: str = None) -> List:
         """Execute *SELECT \\* FROM tbl WHERE pk = literal*
         against one or many backends.
 
@@ -215,25 +209,30 @@ class PolyClient:
         ----------
         sql : str
             SQL statement – only a limited subset is supported.
-        engines : str | list[str] | None, optional
+        engine : str
             *None* → use the catalogue‑owner backend (default).
             A backend name or list thereof → fan‑out query to each requested
             backend (`"postgres"|"redis"|"neo4j"`).
-        include_source : bool, optional
-            When *True*, each returned dict gains a field ``"_source"`` with
-            the backend that produced the row.
         """
 
         table, pk_col, pk_val = self.query_parse_validate_grammar(sql)
+        print(table, pk_col, pk_val)
+        if not engine:
+            backend_tuple = self._catalogue.get(table, ("postgres", pk_col))
+            backend, expected_pk = backend_tuple
+            print(pk_col.lower(), expected_pk.lower())
+            if pk_col.lower() != expected_pk.lower():
+                raise ValueError(
+                    f"Predicate column must be primary key, got '{pk_col}'"
+                )
+        else:
+            backend = engine
 
-        backends = self.set_backends(table, pk_col, engines)
-
-        # ------------------------------------------------------------------
-        # 3. Fan‑out execution
-        # ------------------------------------------------------------------
-        conn = self.backends.get(backends[0])
+        conn = self.backends.get(backend)
         if not conn:
-            raise ValueError(f"Unknown backend '{backends[0]}'")
+            raise ValueError(f"Unknown backend '{backend}'")
+        print(table)
+        print(pk_val)
         row = await conn.get(table, pk_val)
 
-        return row
+        return [row] if row else []
