@@ -23,6 +23,8 @@ from sqlglot import exp
 
 from polyfuseql.catalogue.Catalogue import Catalogue
 from polyfuseql.connector.ConnectorFactory import ConnectorFactory
+from polyfuseql.strategy.Insert import InsertStrategy
+from polyfuseql.strategy.Select import SelectStrategy
 
 # ────────────────────────────────  Router  ────────────────────────────── #
 # logical_name → (engine_attr_on_client, concrete_name_in_store)
@@ -40,6 +42,10 @@ _MAPPING: Dict[str, Tuple[str, str]] = {
 # ---------------------------------------------------------------------------
 # PolyClient
 # ---------------------------------------------------------------------------
+def query_parse_ast(sql: str):
+    return sqlglot.parse_one(sql, dialect="mysql")
+
+
 class PolyClient:
     """Facade that exposes unified helpers plus a tiny SQL router."""
 
@@ -60,6 +66,11 @@ class PolyClient:
             "postgres": self.pg,
             "redis": self.rd,
             "neo4j": self.nj,
+        }
+
+        self.query_strategies = {
+            exp.Select: SelectStrategy(),
+            exp.Insert: InsertStrategy(),
         }
 
     # .................................................................
@@ -236,3 +247,16 @@ class PolyClient:
         row = await conn.get(table, pk_val)
 
         return [row] if row else []
+
+    async def execute(self, sql: str, *, engine: str = None) -> List:
+        ast = query_parse_ast(sql)
+        strategy = self.query_strategies.get(type(ast))
+        if not strategy:
+            raise NotImplementedError(f"Unsupported query type: {type(ast)}")
+
+        table = ast.find(exp.Table).name
+        backend, _ = self._catalogue.get(table, (engine or "postgres", ""))
+        if backend not in self.backends:
+            raise ValueError(f"Unknown backend '{backend}'")
+
+        return await strategy.execute(self, ast, backend)
