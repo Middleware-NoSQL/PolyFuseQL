@@ -88,9 +88,18 @@ class RedisConnector(Connector):
             return raw
 
     async def insert(self, namespace: str, payload: Dict[str, Any]) -> Any:
-        key = f"{namespace}:{payload.get('id')}"
-        data_type = self._options.get("data_type", "")
+        """
+        Inserts a new record into Redis.
+        The primary key must be in the payload.
+        """
+        pk_col = self._options.get("pk", "id")
+        if pk_col not in payload:
+            raise ValueError(f"Primary key '{pk_col}' not found in payload")
+
+        key = f"{namespace}:{payload[pk_col]}"
+        data_type = self._options.get("data_type", "string")
         error_msg = f"Unknown data type: {data_type}"
+
         async with self._redis() as r:
             match data_type:
                 case "string":
@@ -101,4 +110,4 @@ class RedisConnector(Connector):
                     await r.json().set(key, "$", payload)
                 case _:
                     raise NotImplementedError(error_msg)
-        return {"status": "inserted", "key": key}
+        return {"status": "inserted", "key": key, "backend": "redis"}

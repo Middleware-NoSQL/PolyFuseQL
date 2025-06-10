@@ -50,32 +50,43 @@ class PostgresConnector(Connector):
 
     async def get(self, table: str, pk: str) -> Dict[str, Any]:
         pk_col = "customer_id" if table == "customers" else "product_id"
+
+        if table == "Product":
+            pk_col = '"productID"'
+        elif table == "Customer":
+            pk_col = '"customerID"'
+
         conn = await self._connect()
         try:
             query = f"SELECT row_to_json(t) FROM {table} t WHERE {pk_col} = $1"
-            print("GET BEFORE AWAIT" + query)
-            if pk.isdigit():
-                pk_val = int(pk)
-            else:
-                pk_val = pk
+            logging.warning(f"Executing query: {query} with pk: {pk}")
+
+            pk_val = int(pk) if pk.isdigit() else pk
             row = await conn.fetchrow(query, pk_val)
-            print("GET AFTER AWAIT" + str(row))
-            print("GET AFTER AWAIT" + str(type(row)))
-            row = json.loads(row.get("row_to_json"))
-            return _camelize_keys(row) if row else {}
+            if not row:
+                return {}
+
+                # The result from row_to_json is a string,
+                # so it needs to be loaded.
+            data = json.loads(row.get("row_to_json"))
+            return _camelize_keys(data)
         finally:
             await conn.close()
 
     async def insert(self, table: str, payload: Dict[str, Any]) -> Any:
-        cols = ", ".join(payload.keys())
-        placeholders = ", ".join(f"${i + 1}" for i in range(len(payload)))
-        values = list(payload.values())
-
+        """Inserts a new record into the specified table."""
         conn = await self._connect()
-        sql_query = f"INSERT INTO {table} ({cols}) VALUES ({placeholders})"
-        sql_query = sql_query + " RETURNING *"
         try:
+            # Use proper quoting for identifiers
+            cols = ", ".join(f'"{k}"' for k in payload.keys())
+            placeholders = ", ".join(f"${i + 1}" for i in range(len(payload)))
+            values = list(payload.values())
+            sql_query = f'INSERT INTO "{table}" ({cols})'
+            sql_query += f" VALUES ({placeholders}) RETURNING *"
+            msg = f"Executing INSERT: {sql_query} with values {values}"
+            logging.warning(msg)
+
             row = await conn.fetchrow(sql_query, *values)
-            return dict(row)
+            return _camelize_keys(dict(row)) if row else {}
         finally:
             await conn.close()

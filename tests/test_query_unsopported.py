@@ -7,4 +7,4 @@ from polyfuseql.client.PolyClient import PolyClient
 async def test_query_unsupported():
     c = PolyClient()
     with pytest.raises(NotImplementedError):
-        await c.query("SELECT name FROM customers")
+        await c.query("ALTER name, colum FROM customers,employees")

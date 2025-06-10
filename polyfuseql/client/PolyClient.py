@@ -54,6 +54,8 @@ class PolyClient:
     # ---------------------------------------------------------------------
 
     def __init__(self, options: Dict = None) -> None:
+        if options is None:
+            options = {}
         self.options = options
         self.pg = ConnectorFactory.create_connector("postgres", options)
         self.rd = ConnectorFactory.create_connector("redis", options)
@@ -212,50 +214,42 @@ class PolyClient:
 
         return backends
 
+        # The old `query` method can now be deprecated or removed.
+        # If kept for backward compatibility,
+        # it should be refactored to use `execute`.
+
     async def query(self, sql: str, *, engine: str = None) -> List:
-        """Execute *SELECT \\* FROM tbl WHERE pk = literal*
-        against one or many backends.
-
-        Parameters
-        ----------
-        sql : str
-            SQL statement – only a limited subset is supported.
-        engine : str
-            *None* → use the catalogue‑owner backend (default).
-            A backend name or list thereof → fan‑out query to each requested
-            backend (`"postgres"|"redis"|"neo4j"`).
         """
+        (Legacy) Executes a SELECT query.
+        For new functionality, prefer the `execute` method.
+        """
+        # For simplicity, this example will just call the new execute method.
+        # In a real scenario, you might add deprecation warnings.
+        result = await self.execute(sql, engine=engine)
+        return result if isinstance(result, list) else [result]
 
-        table, pk_col, pk_val = self.query_parse_validate_grammar(sql)
-        print(table, pk_col, pk_val)
-        if not engine:
-            backend_tuple = self._catalogue.get(table, ("postgres", pk_col))
-            backend, expected_pk = backend_tuple
-            print(pk_col.lower(), expected_pk.lower())
-            if pk_col.lower() != expected_pk.lower():
-                raise ValueError(
-                    f"Predicate column must be primary key, got '{pk_col}'"
-                )
-        else:
-            backend = engine
-
-        conn = self.backends.get(backend)
-        if not conn:
-            raise ValueError(f"Unknown backend '{backend}'")
-        print(table)
-        print(pk_val)
-        row = await conn.get(table, pk_val)
-
-        return [row] if row else []
-
-    async def execute(self, sql: str, *, engine: str = None) -> List:
-        ast = query_parse_ast(sql)
+    async def execute(self, sql: str, *, engine: str = None) -> list | dict:
+        """
+        Parses and executes a SQL query using the appropriate strategy.
+        """
+        ast = sqlglot.parse_one(sql)
         strategy = self.query_strategies.get(type(ast))
+
         if not strategy:
             raise NotImplementedError(f"Unsupported query type: {type(ast)}")
 
-        table = ast.find(exp.Table).name
-        backend, _ = self._catalogue.get(table, (engine or "postgres", ""))
+        # Determine the table and default backend from the catalog
+        table_node = ast.find(exp.Table)
+        if not table_node:
+            raise ValueError("No table found in query")
+        table = table_node.name
+
+        # If an engine is specified, use it. Otherwise, use the catalog.
+        if engine:
+            backend = engine
+        else:
+            backend, _ = self._catalogue.get(table.lower(), ("postgres", ""))
+
         if backend not in self.backends:
             raise ValueError(f"Unknown backend '{backend}'")
 
