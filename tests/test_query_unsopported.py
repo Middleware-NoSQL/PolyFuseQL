@@ -5,6 +5,8 @@ from polyfuseql.client.PolyClient import PolyClient
 
 @pytest.mark.asyncio
 async def test_query_unsupported():
-    c = PolyClient()
-    with pytest.raises(NotImplementedError):
-        await c.query("ALTER name, colum FROM customers,employees")
+    async with PolyClient() as c:
+        with pytest.raises(NotImplementedError):
+            await c.execute(
+                "ALTER name, colum FROM customers,employees", engine="neo4j"
+            )

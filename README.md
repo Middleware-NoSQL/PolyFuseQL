@@ -43,7 +43,7 @@ import asyncio
 
 async def demo():
   pc = PolyClient()
-  rows = await pc.query("SELECT * FROM customers WHERE customerId = 'ALFKI'")
+  rows = await pc.execute("SELECT * FROM customers WHERE customerId = 'ALFKI'")
   print(rows[0]["companyName"]) # -> Alfreds Futterkiste
 
 asyncio.run(demo())

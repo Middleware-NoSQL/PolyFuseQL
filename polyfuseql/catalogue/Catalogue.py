@@ -5,9 +5,15 @@ from typing import Tuple
 ROOT = pathlib.Path(__file__).resolve().parent.parent  # repo root guess
 DEFAULT_MAPPING: dict[str, Tuple[str, str]] = {
     # table : (backend, pkCol)
-    "customers": ("redis", "customerId"),
-    "products": ("postgres", "productId"),
-    "customer": ("neo4j", "customerId"),
+    # Corrected PK names to match the actual data properties
+    "customers": ("redis", "customerID"),
+    "products": ("postgres", "productID"),
+    "customer": (
+        "neo4j",
+        "customerID",
+    ),  # Neo4j uses customerID (camelCase with capital ID)
+    "product": ("neo4j", "productID"),  # Neo4j uses productID
+    "person": ("neo4j", "id"),  # Added for the insert test
 }
 
 

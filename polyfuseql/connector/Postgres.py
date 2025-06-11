@@ -1,92 +1,87 @@
-# ---------------------------------------------------------------------------
-# Connectors (very thin) – open/close per call for simplicity
-# ---------------------------------------------------------------------------
 import json
 import logging
-
-from typing import Dict, Any
+from typing import Dict, Any, Optional, List
 
 import asyncpg
 from polyfuseql.connector.Connector import Connector
-from polyfuseql.utils.utils import _camelize_keys, env
+from polyfuseql.utils.utils import _camelize_keys, env, _snake_case
 
 
 class PostgresConnector(Connector):
-    def __init__(self, options: Dict = None) -> None:
+    """Connector for PostgreSQL with persistent connection handling."""
+
+    def __init__(self, options: Optional[Dict] = None) -> None:
         super().__init__(options)
-        self._options = options
         self._host = env("POSTGRES_HOST", "localhost")
         self._port = int(env("POSTGRES_PORT", "5432"))
         self._user = env("POSTGRES_USER", "northwind")
         self._password = env("POSTGRES_PASSWORD", "northwind")
         self._database = env("POSTGRES_DB", "northwind")
+        self._connection: Optional[asyncpg.Connection] = None
 
-    async def _connect(self) -> asyncpg.Connection:
-        return await asyncpg.connect(
-            host=self._host,
-            port=self._port,
-            user=self._user,
-            password=self._password,
-            database=self._database,
-        )
+    async def connect(self) -> None:
+        if not self._connection or self._connection.is_closed():
+            self._connection = await asyncpg.connect(
+                host=self._host,
+                port=self._port,
+                user=self._user,
+                password=self._password,
+                database=self._database,
+            )
+            logging.info("PostgreSQL connection established.")
+
+    async def disconnect(self) -> None:
+        if self._connection and not self._connection.is_closed():
+            await self._connection.close()
+            self._connection = None
+            logging.info("PostgreSQL connection closed.")
+
+    def _get_conn(self) -> asyncpg.Connection:
+        if not self._connection or self._connection.is_closed():
+            raise ConnectionError(
+                "PostgresConnector is not connected. Call connect() first."
+            )
+        return self._connection
 
     async def ping(self) -> bool:
-        conn = await self._connect()
-        try:
-            await conn.execute("SELECT 1")
-            return True
-        finally:
-            await conn.close()
+        conn = self._get_conn()
+        return await conn.execute("SELECT 1") is not None
 
     async def count(self, table: str) -> int:
-        conn = await self._connect()
-        try:
-            query = f"SELECT COUNT(*) AS n FROM {table}"
-            logging.log(logging.WARNING, query)
-            row = await conn.fetchrow(query)
-            return int(row["n"])
-        finally:
-            await conn.close()
+        conn = self._get_conn()
+        query = f'SELECT COUNT(*) AS n FROM "{table}"'
+        row = await conn.fetchrow(query)
+        return int(row["n"]) if row else 0
 
-    async def get(self, table: str, pk: str) -> Dict[str, Any]:
-        pk_col = "customer_id" if table == "customers" else "product_id"
+    async def get(
+        self, table: str, pk_col: str, pk_val: Any
+    ) -> Dict[str, Any]:  # noqa: F501
+        conn = self._get_conn()
+        db_pk_col = _snake_case(pk_col)
+        query = f'SELECT {db_pk_col} FROM "{table}"'
+        query += f' WHERE "{db_pk_col}" = $1'  # noqa: F501
+        row = await conn.fetchrow(query, pk_val)
+        if not row:
+            return {}
+        data = json.loads(row.get("row_to_json"))
+        return _camelize_keys(data) if data else {}
 
-        if table == "Product":
-            pk_col = '"productID"'
-        elif table == "Customer":
-            pk_col = '"customerID"'
-
-        conn = await self._connect()
-        try:
-            query = f"SELECT row_to_json(t) FROM {table} t WHERE {pk_col} = $1"
-            logging.warning(f"Executing query: {query} with pk: {pk}")
-
-            pk_val = int(pk) if pk.isdigit() else pk
-            row = await conn.fetchrow(query, pk_val)
-            if not row:
-                return {}
-
-                # The result from row_to_json is a string,
-                # so it needs to be loaded.
-            data = json.loads(row.get("row_to_json"))
-            return _camelize_keys(data)
-        finally:
-            await conn.close()
+    async def query(
+        self, sql: str, params: Optional[tuple] = None
+    ) -> List[Dict[str, Any]]:
+        conn = self._get_conn()
+        records = (
+            await conn.fetch(sql, *params) if params else await conn.fetch(sql)
+        )  # noqa: F401
+        return [_camelize_keys(dict(r)) for r in records]
 
     async def insert(self, table: str, payload: Dict[str, Any]) -> Any:
-        """Inserts a new record into the specified table."""
-        conn = await self._connect()
-        try:
-            # Use proper quoting for identifiers
-            cols = ", ".join(f'"{k}"' for k in payload.keys())
-            placeholders = ", ".join(f"${i + 1}" for i in range(len(payload)))
-            values = list(payload.values())
-            sql_query = f'INSERT INTO "{table}" ({cols})'
-            sql_query += f" VALUES ({placeholders}) RETURNING *"
-            msg = f"Executing INSERT: {sql_query} with values {values}"
-            logging.warning(msg)
-
-            row = await conn.fetchrow(sql_query, *values)
-            return _camelize_keys(dict(row)) if row else {}
-        finally:
-            await conn.close()
+        conn = self._get_conn()
+        db_payload = {_snake_case(k): v for k, v in payload.items()}
+        cols = ", ".join(f'"{k}"' for k in db_payload.keys())
+        placeholders = ", ".join(f"${i + 1}" for i in range(len(db_payload)))
+        values = list(db_payload.values())
+        sql_query = f'INSERT INTO "{table}" ({cols}) '
+        sql_query += f"VALUES ({placeholders}) RETURNING *"  # noqa: F501
+        row = await conn.fetchrow(sql_query, *values)
+        return _camelize_keys(dict(row)) if row else {}

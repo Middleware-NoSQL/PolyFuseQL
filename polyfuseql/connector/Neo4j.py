@@ -1,64 +1,90 @@
-from typing import Dict, Any
-
+# ruff: noqa: F401
+import logging
+from typing import Dict, Any, Optional, List
 from polyfuseql.connector.Connector import Connector
-from neo4j import AsyncGraphDatabase
-
+from neo4j import AsyncGraphDatabase as AGD, AsyncDriver
 from polyfuseql.utils.utils import env
 
 
 class Neo4jConnector(Connector):
-    def __init__(self, options: Dict = None) -> None:
+    """Connector for Neo4j with persistent connection handling."""
+
+    def __init__(self, options: Optional[Dict] = None) -> None:
         super().__init__(options)
         host = env("NEO4J_HOST", "localhost")
         port = env("NEO4J_PORT", "7687")
         user = env("NEO4J_USER", "neo4j")
         password = env("NEO4J_PASSWORD", "password")
-        uri = f"bolt://{host}:{port}"
-        self._driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
+        self._uri = f"bolt://{host}:{port}"
+        self._auth = (user, password)
+        self._driver: Optional[AsyncDriver] = None
+
+    async def connect(self) -> None:
+        if not self._driver:
+            self._driver = AGD.driver(self._uri, auth=self._auth)
+            logging.info("Neo4j driver initialized.")
+            await self.ping()
+
+    async def disconnect(self) -> None:
+        if self._driver:
+            await self._driver.close()
+            self._driver = None
+            logging.info("Neo4j driver closed.")
+
+    def _get_driver(self) -> AsyncDriver:
+        if not self._driver:
+            raise ConnectionError(
+                "Neo4jConnector is not connected. Call connect() first."
+            )
+        return self._driver
 
     async def ping(self) -> bool:
-        async with self._driver.session() as s:
+        driver = self._get_driver()
+        async with driver.session() as s:
             await s.run("RETURN 1")
-            return True
+        return True
 
     async def count(self, label: str) -> int:
-        async with self._driver.session() as s:
+        driver = self._get_driver()
+        async with driver.session() as s:
             query = f"MATCH (n:{label.capitalize()}) RETURN count(n) AS n"
             result = await s.run(query)
             rec = await result.single()
-            return rec["n"]
+            return rec["n"] if rec else 0
 
-    async def get(self, label: str, pk: str) -> Dict[str, Any]:
-        """Fetch one node by its *possible* primary‑key property.
-
-        The seed dataset is inconsistent (`customerId` vs `CustomerID` vs
-        `entityId`).  Try a list of candidate property names until a match
-        is found.  Returns an empty dict if nothing matches.
-        """
-        prop_candidates = [
-            f"{label}Id",  # customerId / productId
-            f"{label}ID",  # customerID / productID
-            "CustomerID",
-            "ProductID",  # specific Northwind convention
-            "entityId",
-            "id",
-        ]
-
-        async with self._driver.session() as s:
-            for prop in prop_candidates:
-                cypher = (
-                    f"MATCH (n:{label.capitalize()}) "
-                    f"WHERE n.{prop} = $id RETURN properties(n) AS p LIMIT 1"
-                )
-                rec = await (await s.run(cypher, id=pk)).single()
-                if rec and rec["p"]:
-                    return rec["p"]
-        return {}
+    async def get(
+        self, label: str, pk_col: str, pk_val: Any
+    ) -> Dict[str, Any]:  # noqa: F501
+        driver = self._get_driver()
+        async with driver.session() as s:
+            cypher_match = f"MATCH (n:{label.capitalize()}) "
+            cypher_where = f"WHERE n.`{pk_col}` "  # noqa: F501
+            cypher = (
+                cypher_match
+                + cypher_where
+                + "= $pk_val RETURN properties(n) AS p LIMIT 1"
+            )
+            print("Neo4j-con-get-cypher", cypher)
+            print("Neo4j-con-get-pk_val", pk_val)
+            print("Neo4j-con-get-pk_val-type", type(pk_val))
+            result = await s.run(cypher, pk_val=pk_val)
+            rec = await result.single()
+            return rec["p"] if rec and rec["p"] else {}
 
     async def insert(self, label: str, payload: Dict[str, Any]) -> Any:
-        props = ", ".join(f"{k}: ${k}" for k in payload.keys())
-        cypher = f"CREATE (n:{label.capitalize()} {{ {props} }}) RETURN n"
-        async with self._driver.session() as s:
+        driver = self._get_driver()
+        props = ", ".join(f"`{k}`: ${k}" for k in payload.keys())
+
+        cypher = f"CREATE (n:{label.capitalize()} {{ {props} }}) "
+        cypher += "RETURN properties(n) as p"
+        async with driver.session() as s:
             result = await s.run(cypher, **payload)
             rec = await result.single()
-            return rec["n"] if rec else {}
+            return rec["p"] if rec else {}
+
+    async def query(
+        self, sql: str, params: Optional[tuple] = None
+    ) -> List[Dict[str, Any]]:
+        raise NotImplementedError(
+            "Neo4jConnector expects Cypher, not SQL, for generic queries."
+        )

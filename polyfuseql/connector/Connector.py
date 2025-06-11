@@ -1,11 +1,20 @@
-# connector_base.py
 from abc import ABC, abstractmethod
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 
 class Connector(ABC):
-    def __init__(self, options: Dict = None) -> None:
+    def __init__(self, options: Optional[Dict] = None) -> None:
         self._options = options or {}
+
+    @abstractmethod
+    async def connect(self):
+        """Establish a persistent connection to the database."""
+        pass
+
+    @abstractmethod
+    async def disconnect(self):
+        """Close the persistent connection."""
+        pass
 
     @abstractmethod
     async def ping(self) -> bool:
@@ -16,9 +25,18 @@ class Connector(ABC):
         pass
 
     @abstractmethod
-    async def get(self, entity: str, pk: str) -> Dict[str, Any]:
+    async def get(
+        self, entity: str, pk_col: str, pk_val: Any
+    ) -> Dict[str, Any]:  # noqa: F501
         pass
 
     @abstractmethod
     async def insert(self, entity: str, payload: Dict[str, Any]) -> Any:
+        pass
+
+    @abstractmethod
+    async def query(
+        self, sql: str, params: tuple = None
+    ) -> list[dict[str, Any]]:  # noqa: F501
+        """Executes a raw SQL-like query."""
         pass

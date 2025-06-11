@@ -3,7 +3,7 @@ from sqlglot import exp
 
 
 class InsertStrategy(QueryStrategy):
-    async def execute(self, client, ast, backend):
+    async def execute(self, client, ast, backend, use_catalogue):
         """
         Executes an INSERT statement.
 
@@ -17,8 +17,15 @@ class InsertStrategy(QueryStrategy):
         """
         if not isinstance(ast, exp.Insert):
             raise ValueError("AST node is not an Insert expression")
+        if use_catalogue:
+            catalogue_entry = client.get_catalogue()
+            _, table = catalogue_entry
+        else:
+            table = ast.this.this.name
 
-        table = ast.this.this.name
+        print("insert-strategy-table", table)
+        print("insert-strategy-table-type", type(table))
+
         columns = [col.name for col in ast.this.expressions]
 
         # The values are nested inside a Values expression

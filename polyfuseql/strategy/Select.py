@@ -3,21 +3,38 @@ from sqlglot import exp
 
 
 class SelectStrategy(QueryStrategy):
-    async def execute(self, client, ast, backend):
-        """
-        Executes an SELECT statement.
+    async def execute(self, client, ast, backend, use_catalogue):
+        conn = client.backends.get(backend)
+        if not conn:
+            raise ValueError(f"Connector for backend '{backend}' not found.")
 
-        Args:
-            client: The PolyClient instance.
-            ast: The AST for the SELECT statement.
-            backend: The target backend.
+        table_name = ast.find(exp.Table).name.lower()
+        if not use_catalogue:
+            catalogue_entry = client._catalogue.get(table_name)
+            _, pk_col = catalogue_entry
+        else:
+            _, pk_col = table_name
 
-        Returns:
-            The result from the connector's select method.
-        """
-        table = ast.find(exp.Table).name
         where_expr = ast.args.get("where").this
-        # pk_col = where_expr.left.name # column will never be used?
-        pk_val = where_expr.right.this
-        conn = client.backends[backend]
-        return [await conn.get(table, pk_val)]
+
+        # --- START: Corrected Primary Key Value Extraction ---
+        lit_expr = where_expr.right
+        msg = "WHERE clause must compare to "
+        msg += "a literal value (string or number)."  # noqa: F501
+        if not isinstance(lit_expr, exp.Literal):
+            raise NotImplementedError(msg)
+
+        # Use sqlglot's properties to determine the type natively.
+        if lit_expr.is_string:
+            pk_val = lit_expr.this  # .this provides the unquoted string value
+        else:
+            # It's a number, so we safely convert it.
+            try:
+                pk_val = int(lit_expr.this)
+            except ValueError:
+                pk_val = float(lit_expr.this)
+        # --- END: Corrected Primary Key Value Extraction ---
+
+        physical_table = ast.find(exp.Table).name
+        result = await conn.get(physical_table, pk_col, pk_val)
+        return [result] if result else []

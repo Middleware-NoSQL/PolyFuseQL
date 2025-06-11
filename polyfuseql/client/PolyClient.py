@@ -9,10 +9,11 @@ If the table is not found in the in‑memory catalogue the query falls
 back to Postgres.
 """
 
+import asyncio
 import json
 import os
 from pathlib import Path
-from typing import Dict, List, Tuple, Union, Sequence
+from typing import Dict, List, Tuple, Union, Sequence, Any
 
 __all__ = [
     "PolyClient",
@@ -54,22 +55,17 @@ class PolyClient:
     # ---------------------------------------------------------------------
 
     def __init__(self, options: Dict = None) -> None:
-        if options is None:
-            options = {}
-        self.options = options
-        self.pg = ConnectorFactory.create_connector("postgres", options)
-        self.rd = ConnectorFactory.create_connector("redis", options)
-        self.nj = ConnectorFactory.create_connector("neo4j", options)
-
-        self._catalogue: Catalogue = Catalogue()
-
+        self.options = options or {}
+        self.pg = ConnectorFactory.create_connector("postgres", self.options)
+        self.rd = ConnectorFactory.create_connector("redis", self.options)
+        self.nj = ConnectorFactory.create_connector("neo4j", self.options)
+        self._catalogue = Catalogue()
         self.backends = {
-            "pg": self.pg,
             "postgres": self.pg,
+            "pg": self.pg,
             "redis": self.rd,
             "neo4j": self.nj,
         }
-
         self.query_strategies = {
             exp.Select: SelectStrategy(),
             exp.Insert: InsertStrategy(),
@@ -78,6 +74,19 @@ class PolyClient:
     # .................................................................
     # internal: mapping loader
     # .................................................................
+
+    async def __aenter__(self):
+        """Establishes connections when entering an `async with` block."""
+        await asyncio.gather(
+            self.pg.connect(), self.rd.connect(), self.nj.connect()
+        )  # noqa: F501
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Closes connections when exiting an `async with` block."""
+        await asyncio.gather(
+            self.pg.disconnect(), self.rd.disconnect(), self.nj.disconnect()
+        )
 
     def _load_mapping(self, mapping_path: str | Path | None) -> None:
         """Populate ``self._catalogue`` with table → (backend, pkColumn).
@@ -96,10 +105,10 @@ class PolyClient:
         if path and path.exists():
             data = json.loads(path.read_text())
             for tbl, spec in data.items():
-                self._catalogue[tbl.lower()] = (spec["backend"], spec["pk"])
+                self.catalogue[tbl.lower()] = (spec["backend"], spec["pk"])
         else:
             # built‑in minimal mapping
-            self._catalogue.update(
+            self.catalogue.update(
                 {
                     "customers": ("redis", "customerId"),
                     "products": ("pg", "productId"),
@@ -123,63 +132,59 @@ class PolyClient:
             case _:
                 raise ValueError(f"Unknown backend: {backend}")
 
-    async def get(self, logical: str, pk: str, backend: str = "") -> Dict:
-        if not backend:
-            backend, source = _MAPPING[logical]
-        source = logical
-        print(backend, source)
+    async def get(
+        self, logical_table: str, pk_val: Any, engine: str = None
+    ) -> Dict:  # npqa: F501
+        """
+        Fetches a single record by its logical table name and
+        primary key value.
+        It uses the Catalogue to determine the backend and primary key column.
+
+        Args:
+            logical_table: The logical name of the table
+            (e.g., 'customers').
+            pk_val: The value of the primary key to look up.
+            engine: (Optional) A specific backend to target,
+            bypassing the catalogue.
+
+        Returns:
+            A dictionary representing the record, or an empty dict if not found
+        """
+        table_lower = logical_table.lower()
+
+        if engine:
+            backend = engine
+
+            if table_lower not in self._catalogue:
+                raise ValueError(
+                    f"Table '{logical_table}' not in catalogue; "
+                    f"cannot determine PK column for specified engine."
+                )
+            _, pk_col = self._catalogue[table_lower]
+        else:
+            # Look up backend and pk_col from the catalogue
+            catalogue_entry = self._catalogue.get(table_lower)
+            if not catalogue_entry:
+                msg = f"Table '{logical_table}' not found in catalogue."
+                raise ValueError(msg)
+            backend, pk_col = catalogue_entry
+
         conn = self.backends.get(backend)
         if not conn:
             raise ValueError(f"Unknown backend '{backend}'")
-        obj = await conn.get(source, pk)
+
+        # Use the physical table name (which might be different) if available,
+        # otherwise default to the logical name.
+        physical_table = _ROUTER.get(table_lower, (None, logical_table))[1]
+        print("physical_table", physical_table)
+        print("pk_col", pk_col)
+        print("pk_val", pk_val)
+        obj = await conn.get(physical_table, pk_col, pk_val)
         return obj
 
         # ---------------------------------------------------------------------
         # NEW: SQL router  (MVP)
         # ---------------------------------------------------------------------
-
-    def query_parse_validate_grammar(self, sql: str) -> Tuple | None:
-        """
-        Analyzes and validates the SQL query.
-        Parameters
-        ----------
-        sql : str
-            SQL statement – only a limited subset is supported.
-        """
-        # ------------------------------------------------------------------
-        # 1. Parse & validate grammar subset
-        # ------------------------------------------------------------------
-        ast = sqlglot.parse_one(sql, dialect="mysql")
-
-        if not isinstance(ast, exp.Select):
-            raise NotImplementedError("Only SELECT supported at this stage")
-        if ast.expressions and not (
-            len(ast.expressions) == 1 and ast.expressions[0].is_star
-        ):
-            msg = "Only SELECT * supported (projections TBD)"
-            raise NotImplementedError(msg)
-
-        # Table name
-        tbl_expr = ast.find(exp.Table)
-        if not tbl_expr:
-            raise NotImplementedError("No table found in query")
-        table = tbl_expr.name
-
-        # WHERE pk = literal predicate
-        where_expr = ast.args.get("where")
-        if isinstance(where_expr, exp.Where):
-            where_expr = where_expr.this
-        if not isinstance(where_expr, exp.EQ):
-            raise NotImplementedError("Require WHERE pk = literal predicate")
-        col_expr, lit_expr = where_expr.left, where_expr.right
-        if not isinstance(col_expr, exp.Column):
-            raise NotImplementedError("Unsupported left-hand expression")
-        if not isinstance(lit_expr, (exp.Literal, exp.Identifier)):
-            raise NotImplementedError("Unsupported literal type")
-        pk_col = col_expr.name
-        pk_val = lit_expr.this  # unquoted value
-
-        return table, pk_col, pk_val
 
     def set_backends(
         self,
@@ -228,29 +233,50 @@ class PolyClient:
         result = await self.execute(sql, engine=engine)
         return result if isinstance(result, list) else [result]
 
-    async def execute(self, sql: str, *, engine: str = None) -> list | dict:
+    async def execute(
+        self, sql: str, *, engine: str = None, use_catalogue: bool = False
+    ) -> list | dict:
         """
-        Parses and executes a SQL query using the appropriate strategy.
+        Parses and executes a SQL query.
+
+        Args:
+            sql: The SQL statement to execute.
+            use_catalogue: If True, uses the catalogue for routing.
+            engine: The target backend. Required if use_catalogue is False.
         """
+        if not use_catalogue and not engine:
+            msg = (
+                "An explicit 'engine' must be provided "
+                "when not using the catalogue."  # noqa: F501
+            )
+            raise ValueError(msg)
+
         ast = sqlglot.parse_one(sql)
+
         strategy = self.query_strategies.get(type(ast))
 
         if not strategy:
             raise NotImplementedError(f"Unsupported query type: {type(ast)}")
 
-        # Determine the table and default backend from the catalog
-        table_node = ast.find(exp.Table)
-        if not table_node:
-            raise ValueError("No table found in query")
-        table = table_node.name
+        target_backend = engine
+        if use_catalogue:
+            table_name = ast.find(exp.Table).name.lower()
+            catalogue_entry = self._catalogue.get(table_name)
+            if not catalogue_entry:
+                msg = f"Table '{table_name}' not found in catalogue."
+                raise ValueError(msg)
 
-        # If an engine is specified, use it. Otherwise, use the catalog.
-        if engine:
-            backend = engine
-        else:
-            backend, _ = self._catalogue.get(table.lower(), ("postgres", ""))
+            # Use catalogue's backend, but allow user to override/validate
+            catalogue_backend, _ = catalogue_entry
+            if engine and engine != catalogue_backend:
+                msg = f"Engine override '{engine}' conflicts"
+                msg += f" with catalogue backend '{catalogue_backend}'"
+                msg += f" for table '{table_name}'."  # noqa: F501
+                raise ValueError(msg)
+            target_backend = catalogue_backend
 
-        if backend not in self.backends:
-            raise ValueError(f"Unknown backend '{backend}'")
+        if not target_backend:
+            # This case should now be unreachable due to the initial check
+            raise ValueError("Could not determine target backend.")
 
-        return await strategy.execute(self, ast, backend)
+        return await strategy.execute(self, ast, target_backend, use_catalogue)
