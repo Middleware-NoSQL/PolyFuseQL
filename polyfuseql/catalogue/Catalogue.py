@@ -6,7 +6,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent  # repo root guess
 DEFAULT_MAPPING: dict[str, Tuple[str, str]] = {
     # table : (backend, pkCol)
     # Corrected PK names to match the actual data properties
-    "customers": ("redis", "customerID"),
+    "customers": ("postgres", "customer_id"),
     "products": ("postgres", "productID"),
     "customer": (
         "neo4j",

@@ -7,7 +7,7 @@ async def test_query_product_postgres():
     async with PolyClient() as c:
         # This will now execute against postgres because engine is specified
         rows = await c.execute(
-            'SELECT * FROM products WHERE "productID" = 1', engine="postgres"
+            'SELECT * FROM products WHERE "product_id" = 1', engine="postgres"
         )
         assert rows and rows[0]["productName"] == "Chai"
 

@@ -9,13 +9,17 @@ class SelectStrategy(QueryStrategy):
             raise ValueError(f"Connector for backend '{backend}' not found.")
 
         table_name = ast.find(exp.Table).name.lower()
-        if not use_catalogue:
+        print("select-strategy-get-table_name", table_name)
+        print("select-strategy-get-table_name-type", type(table_name))
+        print("select-strategy-get-use_catalogue", use_catalogue)
+
+        where_expr = ast.args.get("where").this
+        if use_catalogue:
             catalogue_entry = client._catalogue.get(table_name)
             _, pk_col = catalogue_entry
         else:
-            _, pk_col = table_name
-
-        where_expr = ast.args.get("where").this
+            pk_col = str(where_expr.left.this)
+        print("select-strategy-get-pk_col", pk_col)
 
         # --- START: Corrected Primary Key Value Extraction ---
         lit_expr = where_expr.right

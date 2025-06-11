@@ -57,12 +57,17 @@ class PostgresConnector(Connector):
         self, table: str, pk_col: str, pk_val: Any
     ) -> Dict[str, Any]:  # noqa: F501
         conn = self._get_conn()
-        db_pk_col = _snake_case(pk_col)
-        query = f'SELECT {db_pk_col} FROM "{table}"'
-        query += f' WHERE "{db_pk_col}" = $1'  # noqa: F501
+
+        query = "SELECT row_to_json(t) FROM "
+        query += f" {table} t WHERE {pk_col} = $1"  # noqa: F501
+        print("postgres-conector-get-query", query)
+        print("postgres-conector-get-pk_val", pk_val)
+        print("postgres-conector-get-pk_val-type", type(pk_val))
         row = await conn.fetchrow(query, pk_val)
         if not row:
             return {}
+        print("Postgres-get-row", row)
+        print("Postgres-get-row-get", row.get("row_to_json"))
         data = json.loads(row.get("row_to_json"))
         return _camelize_keys(data) if data else {}
 
@@ -72,7 +77,7 @@ class PostgresConnector(Connector):
         conn = self._get_conn()
         records = (
             await conn.fetch(sql, *params) if params else await conn.fetch(sql)
-        )  # noqa: F401
+        )  # noqa: F501
         return [_camelize_keys(dict(r)) for r in records]
 
     async def insert(self, table: str, payload: Dict[str, Any]) -> Any:

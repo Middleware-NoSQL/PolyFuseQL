@@ -275,6 +275,9 @@ class PolyClient:
                 raise ValueError(msg)
             target_backend = catalogue_backend
 
+        print("polyclient-execute-use_catalogue", use_catalogue)
+        print("polyclient-execute-ast", ast.find(exp.Table).name)
+        print("polyclient-execute-query", sql)
         if not target_backend:
             # This case should now be unreachable due to the initial check
             raise ValueError("Could not determine target backend.")
