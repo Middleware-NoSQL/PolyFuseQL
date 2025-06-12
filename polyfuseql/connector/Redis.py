@@ -80,9 +80,17 @@ class RedisConnector(Connector):
         r = self._get_client()
         pk_col = self._options.get("pk", "id")
         pk_val = payload.get(pk_col)
-        msg = f"Primary key '{pk_col}' not found in payload for Redis insert."
         if not pk_val:
-            raise ValueError(msg)
+            pk_col_old = pk_col
+            for key, value in payload.items():
+                pk_col, pk_val = key, value
+                break
+            msg = (
+                f"Primary key '{pk_col_old}' not found "
+                f"in payload for Redis insert."
+                f" Using the first column as id: {pk_col}"
+            )
+            logging.warning(msg)
 
         key = f"{namespace}:{pk_val}"
         data_type = self._options.get("data_type", "string")
@@ -103,3 +111,10 @@ class RedisConnector(Connector):
     ) -> List[Dict[str, Any]]:
         msg = "RedisConnector does not support raw SQL queries."
         raise NotImplementedError(msg)
+
+    async def delete(self, namespace: str, pk_col: str, pk_val: Any) -> int:
+        r = self._get_client()
+        key = f"{namespace}:{pk_val}"
+        print("redis-delete-key", key)
+        deleted_count = await r.delete(key)
+        return deleted_count

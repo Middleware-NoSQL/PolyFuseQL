@@ -90,3 +90,16 @@ class PostgresConnector(Connector):
         sql_query += f"VALUES ({placeholders}) RETURNING *"  # noqa: F501
         row = await conn.fetchrow(sql_query, *values)
         return _camelize_keys(dict(row)) if row else {}
+
+    async def delete(self, table: str, pk_col: str, pk_val: Any) -> int:
+        conn = self._get_conn()
+        db_pk_col = _snake_case(pk_col)
+
+        # Use proper quoting for identifiers
+        query = f'DELETE FROM "{table}" WHERE "{db_pk_col}" = $1'
+
+        result = await conn.execute(query, pk_val)
+
+        # The result string is in the format 'DELETE N', so we parse N
+        deleted_count = int(result.split(" ")[1])
+        return deleted_count

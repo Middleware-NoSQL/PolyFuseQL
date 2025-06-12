@@ -35,6 +35,12 @@ class Connector(ABC):
         pass
 
     @abstractmethod
+    async def delete(self, entity: str, pk_col: str, pk_val: Any) -> int:
+        """Delete a record by its primary key and return
+        the count of deleted records."""
+        pass
+
+    @abstractmethod
     async def query(
         self, sql: str, params: tuple = None
     ) -> list[dict[str, Any]]:  # noqa: F501

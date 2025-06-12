@@ -88,3 +88,13 @@ class Neo4jConnector(Connector):
         raise NotImplementedError(
             "Neo4jConnector expects Cypher, not SQL, for generic queries."
         )
+
+    async def delete(self, label: str, pk_col: str, pk_val: Any) -> int:
+        driver = self._get_driver()
+        async with driver.session() as s:
+            cypher = (
+                f"MATCH (n:{label.capitalize()} {{{pk_col}: $pk_val}}) "
+                "DETACH DELETE n"
+            )
+            summary = await s.run(cypher, pk_val=pk_val)
+            return 1 if summary else 0

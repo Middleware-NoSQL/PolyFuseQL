@@ -11,6 +11,7 @@ back to Postgres.
 
 import asyncio
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Dict, List, Tuple, Union, Sequence, Any
@@ -24,6 +25,7 @@ from sqlglot import exp
 
 from polyfuseql.catalogue.Catalogue import Catalogue
 from polyfuseql.connector.ConnectorFactory import ConnectorFactory
+from polyfuseql.strategy.Delete import DeleteStrategy
 from polyfuseql.strategy.Insert import InsertStrategy
 from polyfuseql.strategy.Select import SelectStrategy
 
@@ -69,6 +71,7 @@ class PolyClient:
         self.query_strategies = {
             exp.Select: SelectStrategy(),
             exp.Insert: InsertStrategy(),
+            exp.Delete: DeleteStrategy(),
         }
 
     # .................................................................
@@ -105,17 +108,10 @@ class PolyClient:
         if path and path.exists():
             data = json.loads(path.read_text())
             for tbl, spec in data.items():
-                self.catalogue[tbl.lower()] = (spec["backend"], spec["pk"])
+                self._catalogue[tbl.lower()] = (spec["backend"], spec["pk"])
         else:
             # built‑in minimal mapping
-            self.catalogue.update(
-                {
-                    "customers": ("redis", "customerId"),
-                    "products": ("pg", "productId"),
-                    "customer": ("neo4j", "customerId"),  # node label
-                    "product": ("neo4j", "productId"),
-                }
-            )
+            self._catalogue.update({})
 
     async def count(self, logical: str, backend: str = "") -> int:
         if not backend:
@@ -150,20 +146,22 @@ class PolyClient:
         Returns:
             A dictionary representing the record, or an empty dict if not found
         """
-        table_lower = logical_table.lower()
 
         if engine:
             backend = engine
 
-            if table_lower not in self._catalogue:
-                raise ValueError(
+            if logical_table not in self._catalogue:
+                logging.warning(
                     f"Table '{logical_table}' not in catalogue; "
-                    f"cannot determine PK column for specified engine."
+                    f"cannot determine PK column for specified engine. "
+                    f"Using {logical_table} instead."
                 )
-            _, pk_col = self._catalogue[table_lower]
+                pk_col = logical_table
+            else:
+                _, pk_col = self._catalogue[logical_table]
         else:
             # Look up backend and pk_col from the catalogue
-            catalogue_entry = self._catalogue.get(table_lower)
+            catalogue_entry = self._catalogue.get(logical_table)
             if not catalogue_entry:
                 msg = f"Table '{logical_table}' not found in catalogue."
                 raise ValueError(msg)
@@ -175,10 +173,10 @@ class PolyClient:
 
         # Use the physical table name (which might be different) if available,
         # otherwise default to the logical name.
-        physical_table = _ROUTER.get(table_lower, (None, logical_table))[1]
-        print("physical_table", physical_table)
-        print("pk_col", pk_col)
-        print("pk_val", pk_val)
+        physical_table = _ROUTER.get(logical_table, (None, logical_table))[1]
+        print("polyclient-get-physical_table", physical_table)
+        print("polyclient-get-pk_col", pk_col)
+        print("polyclient-get-pk_val", pk_val)
         obj = await conn.get(physical_table, pk_col, pk_val)
         return obj
 
