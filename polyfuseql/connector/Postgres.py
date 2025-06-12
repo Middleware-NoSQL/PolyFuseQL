@@ -103,3 +103,29 @@ class PostgresConnector(Connector):
         # The result string is in the format 'DELETE N', so we parse N
         deleted_count = int(result.split(" ")[1])
         return deleted_count
+
+    async def update(
+        self, table: str, pk_col: str, pk_val: Any, payload: Dict[str, Any]
+    ) -> int:
+        conn = self._get_conn()
+        db_pk_col = _snake_case(pk_col)
+
+        # Build the SET part of the query
+        set_clauses = []
+        values = []
+        for i, (key, value) in enumerate(payload.items()):
+            db_key = _snake_case(key)
+            set_clauses.append(f'"{db_key}" = ${i + 1}')
+            values.append(value)
+
+        set_clause_str = ", ".join(set_clauses)
+        values.append(pk_val)
+
+        query = (
+            f'UPDATE "{table}" SET {set_clause_str} '
+            f'WHERE "{db_pk_col}" = ${len(values)}'
+        )
+
+        result = await conn.execute(query, *values)
+        deleted_count = int(result.split(" ")[1])
+        return deleted_count

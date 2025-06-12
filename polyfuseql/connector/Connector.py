@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 
 class Connector(ABC):
@@ -35,6 +35,14 @@ class Connector(ABC):
         pass
 
     @abstractmethod
+    async def update(
+        self, entity: str, pk_col: str, pk_val: Any, payload: Dict[str, Any]
+    ) -> int:  # noqa: F501
+        """Update a record by its primary key and
+        return the count of updated records."""
+        pass
+
+    @abstractmethod
     async def delete(self, entity: str, pk_col: str, pk_val: Any) -> int:
         """Delete a record by its primary key and return
         the count of deleted records."""
@@ -43,6 +51,6 @@ class Connector(ABC):
     @abstractmethod
     async def query(
         self, sql: str, params: tuple = None
-    ) -> list[dict[str, Any]]:  # noqa: F501
+    ) -> List[dict[str, Any]]:  # noqa: F501
         """Executes a raw SQL-like query."""
         pass

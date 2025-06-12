@@ -118,3 +118,41 @@ class RedisConnector(Connector):
         print("redis-delete-key", key)
         deleted_count = await r.delete(key)
         return deleted_count
+
+    async def update(
+        self, namespace: str, pk_col: str, pk_val: Any, payload: Dict[str, Any]
+    ) -> int:
+        r = self._get_client()
+        key = f"{namespace}:{pk_val}"
+        data_type = self._options.get("data_type", "string")
+        print("redis-update-key", key)
+        print("redis-update-value", payload)
+        if not await r.exists(key):
+            return 0
+
+        match data_type:
+            case "string":
+                # Inefficient Read-Modify-Write for string-encoded JSON
+                raw = await r.get(key)
+                print("redis-string-raw", raw)
+                if not raw:
+                    return 0
+                data = json.loads(raw)
+                print("redis-string-json", data)
+                data.update(payload)
+                print("redis-string-json-updated", data)
+                await r.set(key, json.dumps(data))
+                return 1
+            case "hash":
+                # Efficient partial update for HASH
+                await r.hset(key, mapping=payload)
+                return 1
+            case "json":
+                # Efficient partial update for JSON
+                for field, value in payload.items():
+                    await r.json().set(key, f"$.{field}", value)
+                return 1
+            case _:
+                raise NotImplementedError(
+                    f"Unsupported data type for update: {data_type}"
+                )

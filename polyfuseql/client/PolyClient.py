@@ -28,6 +28,7 @@ from polyfuseql.connector.ConnectorFactory import ConnectorFactory
 from polyfuseql.strategy.Delete import DeleteStrategy
 from polyfuseql.strategy.Insert import InsertStrategy
 from polyfuseql.strategy.Select import SelectStrategy
+from polyfuseql.strategy.Update import UpdateStrategy
 
 # ────────────────────────────────  Router  ────────────────────────────── #
 # logical_name → (engine_attr_on_client, concrete_name_in_store)
@@ -71,6 +72,7 @@ class PolyClient:
         self.query_strategies = {
             exp.Select: SelectStrategy(),
             exp.Insert: InsertStrategy(),
+            exp.Update: UpdateStrategy(),
             exp.Delete: DeleteStrategy(),
         }
 

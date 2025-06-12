@@ -98,3 +98,15 @@ class Neo4jConnector(Connector):
             )
             summary = await s.run(cypher, pk_val=pk_val)
             return 1 if summary else 0
+
+    async def update(
+        self, label: str, pk_col: str, pk_val: Any, payload: Dict[str, Any]
+    ) -> int:
+        driver = self._get_driver()
+        async with driver.session() as s:
+            # The "+=" operator efficiently merges properties
+            # from the payload map
+            cypher = f"MATCH (n:{label} {{`{pk_col}`: $pk_val}}) "
+            cypher += "SET n += $payload"
+            summary = await s.run(cypher, pk_val=pk_val, payload=payload)
+            return 1 if summary else 0
