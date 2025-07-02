@@ -32,13 +32,23 @@ def env(name: str, default: str | None = None) -> str | None:  # small shorth.
     return os.environ.get(name, default)
 
 
+def _snake_case(name: str) -> str:
+    """Converts camelCase to snake_case."""
+    s1 = re.sub("(.)([A-Z][a-z]+)", r"\1_\2", name)
+    return re.sub("([a-z0-9])([A-Z])", r"\1_\2", s1).lower()
+
+
 def _camelize_keys(obj: Dict[str, Any]) -> Dict[str, Any]:
-    """Convert snake_case → camelCase for Postgres JSON rows so that they match
-    redis / neo4j payloads."""
+    """Convert snake_case → camelCase for Postgres JSON rows."""
 
     def camel(s: str) -> str:
-        return re.sub(r"_([a-z])", lambda m: m.group(1).upper(), s)
+        # This implementation is better than the previous one
+        parts = s.split("_")
+        return parts[0] + "".join(x.title() for x in parts[1:])
 
     if isinstance(obj, str):
-        obj = json.loads(obj)
+        try:
+            obj = json.loads(obj)
+        except json.JSONDecodeError:
+            return {}
     return {camel(k): v for k, v in obj.items()}

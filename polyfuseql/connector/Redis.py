@@ -1,27 +1,22 @@
 import json
-from contextlib import asynccontextmanager
-from typing import Dict, Any
-
+import logging
+from typing import Dict, Any, Optional, List
 from polyfuseql.connector.Connector import Connector
 from polyfuseql.utils.utils import env
 import redis.asyncio as aioredis
 
 
 class RedisConnector(Connector):
-    def __init__(self, options: Dict = None) -> None:
+    """Connector for Redis with persistent connection handling."""
+
+    def __init__(self, options: Optional[Dict] = None) -> None:
         super().__init__(options)
         self._host = env("REDIS_HOST", "localhost")
         self._port = int(env("REDIS_PORT", "6379"))
-        self._username = env("REDIS_USER", "northwind")
         self._password = env("REDIS_PASSWORD", "northwind")
-        self._client: aioredis.Redis | None = None
-        if options:
-            self._options = options
-        else:
-            self._options = {"data_type": "string"}
+        self._client: Optional[aioredis.Redis] = None
 
-    @asynccontextmanager
-    async def _redis(self):
+    async def connect(self) -> None:
         if not self._client:
             self._client = aioredis.Redis(
                 host=self._host,
@@ -29,60 +24,135 @@ class RedisConnector(Connector):
                 decode_responses=True,
                 password=self._password,
             )
-        try:
-            yield self._client
-        finally:
-            pass  # keep connection open for reuse
+            logging.info("Redis client initialized.")
+
+    async def disconnect(self) -> None:
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+            logging.info("Redis connection closed.")
+
+    def _get_client(self) -> aioredis.Redis:
+        if not self._client:
+            raise ConnectionError(
+                "RedisConnector is not connected. Call connect() first."
+            )
+        return self._client
 
     async def ping(self) -> bool:
-        async with self._redis() as r:
-            return await r.ping()
+        r = self._get_client()
+        return await r.ping()
 
     async def count(self, namespace: str) -> int:
-        prefix = f"{namespace}:*"
-        total, cursor = 0, 0
-        async with self._redis() as r:
-            while True:
-                c = await r.scan(cursor=cursor, match=prefix, count=1000)
-                cursor, keys = c
-                total += len(keys)
-                if cursor == 0:  # fin del cursor
-                    print("cursor was 0")
-                    break
+        r = self._get_client()
+        prefix = f"{namespace.lower()}:*"
+        total = 0
+        cursor = 0
+        while True:
+            cur = await r.scan(cursor=cursor, match=prefix, count=1000)
+            cursor, keys = cur
+            total += len(keys)
+            if cursor == 0:
+                break
         return total
 
-    async def get(self, namespace: str, pk: str) -> Dict[str, Any]:
-        """
-        Accept a format like :json or :hash or :string
-        to get expected data type
-        :param namespace: expected namespace to connect
-        :param pk: identifier of the namespaced entity to get
-        :return: Dictionary with the values of the entity
-        """
-        key = f"{namespace}:{pk}"
-        print(key)
-        data_type = self._options.get("data_type", "")
+    async def get(
+        self, namespace: str, pk_col: str, pk_val: Any
+    ) -> Dict[str, Any]:  # noqa: F501
+        r = self._get_client()
+        key = f"{namespace}:{pk_val}"
+        data_type = self._options.get("data_type", "string")
+
         match data_type:
             case "string":
-                return await self.get_string(key)
+                raw = await r.get(key)
+                return json.loads(raw) if raw else {}
             case "hash":
-                return await self.get_hash(key)
+                raw_hash = await r.hgetall(key)
+                return raw_hash
             case "json":
-                return await self.get_json(key)
+                raw_json = await r.json().get(key)
+                return raw_json if raw_json else {}
+            case _:
+                raise NotImplementedError(f"Unsupported data type:{data_type}")
+
+    async def insert(self, namespace: str, payload: Dict[str, Any]) -> Any:
+        r = self._get_client()
+        pk_col = self._options.get("pk", "id")
+        pk_val = payload.get(pk_col)
+        if not pk_val:
+            pk_col_old = pk_col
+            for key, value in payload.items():
+                pk_col, pk_val = key, value
+                break
+            msg = (
+                f"Primary key '{pk_col_old}' not found "
+                f"in payload for Redis insert."
+                f" Using the first column as id: {pk_col}"
+            )
+            logging.warning(msg)
+
+        key = f"{namespace}:{pk_val}"
+        data_type = self._options.get("data_type", "string")
+
+        match data_type:
+            case "string":
+                await r.set(key, json.dumps(payload))
+            case "hash":
+                await r.hset(key, mapping=payload)
+            case "json":
+                await r.json().set(key, "$", payload)
             case _:
                 raise NotImplementedError(f"Unknown data type: {data_type}")
+        return {"status": "inserted", "key": key, "backend": "redis"}
 
-    async def get_string(self, key: str) -> Dict:
-        async with self._redis() as r:
-            raw = await r.get(key)
-            return json.loads(raw) if raw else {}
+    async def query(
+        self, sql: str, params: Optional[tuple] = None
+    ) -> List[Dict[str, Any]]:
+        msg = "RedisConnector does not support raw SQL queries."
+        raise NotImplementedError(msg)
 
-    async def get_hash(self, key: str) -> Dict | None:
-        async with self._redis() as r:
-            raw = await r.hgetall(key)
-            return raw
+    async def delete(self, namespace: str, pk_col: str, pk_val: Any) -> int:
+        r = self._get_client()
+        key = f"{namespace}:{pk_val}"
+        print("redis-delete-key", key)
+        deleted_count = await r.delete(key)
+        return deleted_count
 
-    async def get_json(self, key: str) -> Dict:
-        async with self._redis() as r:
-            raw = await r.json().get(key)
-            return raw
+    async def update(
+        self, namespace: str, pk_col: str, pk_val: Any, payload: Dict[str, Any]
+    ) -> int:
+        r = self._get_client()
+        key = f"{namespace}:{pk_val}"
+        data_type = self._options.get("data_type", "string")
+        print("redis-update-key", key)
+        print("redis-update-value", payload)
+        if not await r.exists(key):
+            return 0
+
+        match data_type:
+            case "string":
+                # Inefficient Read-Modify-Write for string-encoded JSON
+                raw = await r.get(key)
+                print("redis-string-raw", raw)
+                if not raw:
+                    return 0
+                data = json.loads(raw)
+                print("redis-string-json", data)
+                data.update(payload)
+                print("redis-string-json-updated", data)
+                await r.set(key, json.dumps(data))
+                return 1
+            case "hash":
+                # Efficient partial update for HASH
+                await r.hset(key, mapping=payload)
+                return 1
+            case "json":
+                # Efficient partial update for JSON
+                for field, value in payload.items():
+                    await r.json().set(key, f"$.{field}", value)
+                return 1
+            case _:
+                raise NotImplementedError(
+                    f"Unsupported data type for update: {data_type}"
+                )
