@@ -30,7 +30,7 @@ async def test_neo4j_join():
               SELECT o.orderID, c.companyName
               FROM Order o
                        JOIN Customer c ON o.customerID = c.customerID
-              WHERE o.orderID = 10308 \
+              WHERE o.orderID = 10248 \
               """
         results = await client.execute(sql, engine="neo4j")
         assert len(results) >= 1
