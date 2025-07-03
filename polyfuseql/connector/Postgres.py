@@ -3,12 +3,21 @@ import logging
 from typing import Dict, Any, Optional, List
 
 import asyncpg
+
 from polyfuseql.connector.Connector import Connector
 from polyfuseql.utils.utils import _camelize_keys, env, _snake_case
+from sqlglot import exp
 
 
 class PostgresConnector(Connector):
     """Connector for PostgreSQL with persistent connection handling."""
+
+    async def join(self, ast: exp.Select) -> List[Dict[str, Any]]:
+        """Executes a native SQL JOIN query."""
+        return await self.query(ast.sql())
+
+    async def get_all(self, entity: str) -> List[Dict[str, Any]]:
+        pass
 
     def __init__(self, options: Optional[Dict] = None) -> None:
         super().__init__(options)

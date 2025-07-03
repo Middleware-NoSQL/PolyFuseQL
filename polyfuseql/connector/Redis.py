@@ -4,10 +4,15 @@ from typing import Dict, Any, Optional, List
 from polyfuseql.connector.Connector import Connector
 from polyfuseql.utils.utils import env
 import redis.asyncio as aioredis
+from sqlglot import exp
+import asyncio
 
 
 class RedisConnector(Connector):
     """Connector for Redis with persistent connection handling."""
+
+    async def get_all(self, entity: str) -> List[Dict[str, Any]]:
+        pass
 
     def __init__(self, options: Optional[Dict] = None) -> None:
         super().__init__(options)
@@ -156,3 +161,35 @@ class RedisConnector(Connector):
                 raise NotImplementedError(
                     f"Unsupported data type for update: {data_type}"
                 )
+
+            # In RedisConnector class
+
+    async def join(self, ast: exp.Select) -> List[Dict[str, Any]]:
+        """Performs an application-side INNER JOIN on two Redis namespaces."""
+        # 1. Deconstruct the JOIN query
+        left_table = ast.this.this.name
+        join_clause = ast.find(exp.Join)
+        right_table = join_clause.this.name
+        on_clause = join_clause.on
+
+        left_join_col = on_clause.left.name
+        right_join_col = on_clause.right.name
+
+        # 2. Fetch all data from both namespaces
+        lrt = self.get_all(left_table)
+        rrt = self.get_all(right_table)
+        left_rows, right_rows = await asyncio.gather(lrt, rrt)
+
+        # 3. Create a lookup map for the right side of the join for efficiency
+        right_map = {row.get(right_join_col): row for row in right_rows}
+
+        # 4. Iterate and join
+        joined_results = []
+        for left_row in left_rows:
+            join_key = left_row.get(left_join_col)
+            if join_key in right_map:
+                right_row = right_map[join_key]
+                # Merge the two dictionaries to form the joined row
+                joined_results.append({**left_row, **right_row})
+
+        return joined_results

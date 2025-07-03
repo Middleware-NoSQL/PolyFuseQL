@@ -4,10 +4,14 @@ from typing import Dict, Any, Optional, List
 from polyfuseql.connector.Connector import Connector
 from neo4j import AsyncGraphDatabase as AGD, AsyncDriver
 from polyfuseql.utils.utils import env
+from sqlglot import exp
 
 
 class Neo4jConnector(Connector):
     """Connector for Neo4j with persistent connection handling."""
+
+    async def get_all(self, entity: str) -> List[Dict[str, Any]]:
+        pass
 
     def __init__(self, options: Optional[Dict] = None) -> None:
         super().__init__(options)
@@ -110,3 +114,32 @@ class Neo4jConnector(Connector):
             cypher += "SET n += $payload"
             summary = await s.run(cypher, pk_val=pk_val, payload=payload)
             return 1 if summary else 0
+
+    # In Neo4jConnector class
+    async def join(self, ast: exp.Select) -> List[Dict[str, Any]]:
+        """Translates a SQL JOIN to a Cypher MATCH query."""
+        driver = self._get_driver()
+
+        # Deconstruct the SQL JOIN
+        left_table = ast.this.this.name
+        join_clause = ast.find(exp.Join)
+        right_table = join_clause.this.name
+        on_clause = join_clause.on
+
+        # Build the Cypher query
+        # Example: JOIN Customer c ON o.customerID = c.customerID
+        # Becomes: MATCH (o:Order)-[]-(c:Customer)
+        #           WHERE o.customerID = c.customerID
+        lt = left_table.capitalize()
+        rt = right_table.capitalize()
+        cypher_query = (
+            f"MATCH (a:{lt}), (b:{rt}) "
+            f"WHERE a.{on_clause.left.name} = b.{on_clause.right.name} "
+            "RETURN a, b"
+        )
+
+        # For simplicity, returning all properties.
+        # Projections would require more logic.
+        async with driver.session() as s:
+            result = await s.run(cypher_query)
+            return [{**record["a"], **record["b"]} for record in result]

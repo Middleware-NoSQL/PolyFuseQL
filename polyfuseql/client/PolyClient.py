@@ -27,6 +27,7 @@ from polyfuseql.catalogue.Catalogue import Catalogue
 from polyfuseql.connector.ConnectorFactory import ConnectorFactory
 from polyfuseql.strategy.Delete import DeleteStrategy
 from polyfuseql.strategy.Insert import InsertStrategy
+from polyfuseql.strategy.Join import JoinStrategy
 from polyfuseql.strategy.Select import SelectStrategy
 from polyfuseql.strategy.Update import UpdateStrategy
 
@@ -74,6 +75,7 @@ class PolyClient:
             exp.Insert: InsertStrategy(),
             exp.Update: UpdateStrategy(),
             exp.Delete: DeleteStrategy(),
+            "Join": JoinStrategy(),
         }
 
     # .................................................................
@@ -253,7 +255,11 @@ class PolyClient:
 
         ast = sqlglot.parse_one(sql)
 
-        strategy = self.query_strategies.get(type(ast))
+        # Determine which strategy to use based on the query structure
+        if isinstance(ast, exp.Select) and ast.find(exp.Join):
+            strategy = self.query_strategies["Join"]
+        else:
+            strategy = self.query_strategies.get(type(ast))
 
         if not strategy:
             raise NotImplementedError(f"Unsupported query type: {type(ast)}")
@@ -278,6 +284,7 @@ class PolyClient:
         print("polyclient-execute-use_catalogue", use_catalogue)
         print("polyclient-execute-ast", ast.find(exp.Table).name)
         print("polyclient-execute-query", sql)
+        print("polyclient-execute-strategy", str(strategy.__class__))
         if not target_backend:
             # This case should now be unreachable due to the initial check
             raise ValueError("Could not determine target backend.")

@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, List
+from sqlglot import exp
 
 
 class Connector(ABC):
@@ -46,6 +47,17 @@ class Connector(ABC):
     async def delete(self, entity: str, pk_col: str, pk_val: Any) -> int:
         """Delete a record by its primary key and return
         the count of deleted records."""
+        pass
+
+    @abstractmethod
+    async def get_all(self, entity: str) -> List[Dict[str, Any]]:
+        """Fetch all records for a given entity."""
+        pass
+
+    @abstractmethod
+    async def join(self, ast: exp.Select) -> List[Dict[str, Any]]:
+        """Executes a JOIN query, either natively
+        or via application-side logic."""
         pass
 
     @abstractmethod
