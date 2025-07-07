@@ -5,14 +5,34 @@ from polyfuseql.connector.Connector import Connector
 from polyfuseql.utils.utils import env
 import redis.asyncio as aioredis
 from sqlglot import exp
-import asyncio
 
 
 class RedisConnector(Connector):
     """Connector for Redis with persistent connection handling."""
 
     async def get_all(self, entity: str) -> List[Dict[str, Any]]:
-        pass
+        r = self._get_client()
+        keys = await r.keys(f"{entity}:*")
+        if not keys:
+            return []
+        print("REDIS-get_all-keys", keys)
+        data_type = self._options.get("data_type", "string")
+        msg = f"Unsupported data type:{data_type}"
+        all_list = []
+        for key in keys:
+            match data_type:
+                case "string":
+                    raw = await r.get(key)
+                    all_list.append(json.loads(raw) if raw else {})
+                case "hash":
+                    raw_hash = await r.hgetall(key)
+                    all_list.append(raw_hash if raw_hash else {})
+                case "json":
+                    raw_json = await r.json().get(key)
+                    all_list.append(raw_json if raw_json else {})
+                case _:
+                    raise NotImplementedError(msg)
+        return all_list
 
     def __init__(self, options: Optional[Dict] = None) -> None:
         super().__init__(options)
@@ -99,7 +119,7 @@ class RedisConnector(Connector):
 
         key = f"{namespace}:{pk_val}"
         data_type = self._options.get("data_type", "string")
-
+        msg = f"Unknown data type: {data_type}"
         match data_type:
             case "string":
                 await r.set(key, json.dumps(payload))
@@ -108,7 +128,7 @@ class RedisConnector(Connector):
             case "json":
                 await r.json().set(key, "$", payload)
             case _:
-                raise NotImplementedError(f"Unknown data type: {data_type}")
+                raise NotImplementedError(msg)
         return {"status": "inserted", "key": key, "backend": "redis"}
 
     async def query(
@@ -166,28 +186,51 @@ class RedisConnector(Connector):
 
     async def join(self, ast: exp.Select) -> List[Dict[str, Any]]:
         """Performs an application-side INNER JOIN on two Redis namespaces."""
-        # 1. Deconstruct the JOIN query
-        left_table = ast.this.this.name
-        join_clause = ast.find(exp.Join)
-        right_table = join_clause.this.name
-        on_clause = join_clause.on
+        # 1. Deconstruct the AST using the same robust logic as Neo4j
+        left_table_expr = ast.args.get("from").this
+        join_expr = ast.args.get("joins")[0]
+        right_table_expr = join_expr.this
+        on_condition = join_expr.args.get("on")
 
-        left_join_col = on_clause.left.name
-        right_join_col = on_clause.right.name
+        left_table = left_table_expr.this.name
+        right_table = right_table_expr.this.name
+        print("redis-join-left_table", left_table)
+        print("redis-join-right_table", right_table)
+        left_join_col = on_condition.this.this.name
+        right_join_col = on_condition.expression.this.name
+        print("redis-join-left_join_col", left_join_col)
+        print("redis-join+right_join_col", right_join_col)
 
         # 2. Fetch all data from both namespaces
-        lrt = self.get_all(left_table)
-        rrt = self.get_all(right_table)
-        left_rows, right_rows = await asyncio.gather(lrt, rrt)
+        left_rows = await self.get_all(left_table)
+        right_rows = await self.get_all(right_table)
+
+        print("redis-join-left_rows", left_rows)
+        print("redis-join-right_rows", right_rows)
 
         # 3. Create a lookup map for the right side of the join for efficiency
-        right_map = {row.get(right_join_col): row for row in right_rows}
+        right_map = {str(row.get(right_join_col)): row for row in right_rows}
+        where_clauses = []
+        params = {}
+        if ast.args.get("where"):
+            where_expr = ast.args["where"].this
+            where_col = f"{where_expr.this.table}.{where_expr.this.this.name}"
+            where_clauses.append(f"{where_col} = $where_val")
+
+            lit_expr = where_expr.expression
+            if lit_expr.is_string:
+                params["where_val"] = lit_expr.this
+            else:
+                try:
+                    params["where_val"] = int(lit_expr.this)
+                except ValueError:
+                    params["where_val"] = float(lit_expr.this)
 
         # 4. Iterate and join
         joined_results = []
         for left_row in left_rows:
-            join_key = left_row.get(left_join_col)
-            if join_key in right_map:
+            join_key = str(left_row.get(left_join_col))
+            if join_key in right_map and join_key in params.values():
                 right_row = right_map[join_key]
                 # Merge the two dictionaries to form the joined row
                 joined_results.append({**left_row, **right_row})

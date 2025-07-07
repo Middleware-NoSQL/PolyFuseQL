@@ -161,7 +161,7 @@ class Neo4jConnector(Connector):
         for col_expr in ast.expressions:
             col_name = col_expr.this.name
             table_alias = col_expr.table
-            return_alias = f"`{table_alias}.{col_name}`"
+            return_alias = f"`{col_name}`"
             return_expressions.append(
                 f"{table_alias}.{col_name} AS {return_alias}"
             )  # noqa: F501
