@@ -4,10 +4,14 @@ from typing import Dict, Any, Optional, List
 from polyfuseql.connector.Connector import Connector
 from neo4j import AsyncGraphDatabase as AGD, AsyncDriver
 from polyfuseql.utils.utils import env
+from sqlglot import exp
 
 
 class Neo4jConnector(Connector):
     """Connector for Neo4j with persistent connection handling."""
+
+    async def get_all(self, entity: str) -> List[Dict[str, Any]]:
+        pass
 
     def __init__(self, options: Optional[Dict] = None) -> None:
         super().__init__(options)
@@ -110,3 +114,67 @@ class Neo4jConnector(Connector):
             cypher += "SET n += $payload"
             summary = await s.run(cypher, pk_val=pk_val, payload=payload)
             return 1 if summary else 0
+
+    async def join(self, ast: exp.Select) -> List[Dict[str, Any]]:
+        """Manually translates a SQL JOIN AST to a Cypher query."""
+        driver = self._get_driver()
+
+        # 1. Deconstruct the AST
+        left_table_expr = ast.args.get("from").this
+        join_expr = ast.args.get("joins")[0]
+        right_table_expr = join_expr.this
+        on_condition = join_expr.args.get("on")
+
+        left_table_name = left_table_expr.this.name.capitalize()
+        left_alias = left_table_expr.alias_or_name
+        right_table_name = right_table_expr.this.name.capitalize()
+        right_alias = right_table_expr.alias_or_name
+
+        # 2. Build the MATCH clause
+        match_clause = f"MATCH ({left_alias}:{left_table_name}), "
+        match_clause += f"({right_alias}:{right_table_name})"
+        # 3. Build the WHERE clause
+        on_left = f"{on_condition.this.table}.{on_condition.this.this.name}"
+        on_right = f"{on_condition.expression.table}"
+        on_right += f".{on_condition.expression.this.name}"
+        where_clauses = [f"{on_left} = {on_right}"]
+
+        params = {}
+        if ast.args.get("where"):
+            where_expr = ast.args["where"].this
+            where_col = f"{where_expr.this.table}.{where_expr.this.this.name}"
+            where_clauses.append(f"{where_col} = $where_val")
+
+            lit_expr = where_expr.expression
+            if lit_expr.is_string:
+                params["where_val"] = lit_expr.this
+            else:
+                try:
+                    params["where_val"] = int(lit_expr.this)
+                except ValueError:
+                    params["where_val"] = float(lit_expr.this)
+
+        where_clause_str = " WHERE " + " AND ".join(where_clauses)
+
+        # 5. Build the RETURN clause
+        return_expressions = []
+        for col_expr in ast.expressions:
+            col_name = col_expr.this.name
+            table_alias = col_expr.table
+            return_alias = f"`{col_name}`"
+            return_expressions.append(
+                f"{table_alias}.{col_name} AS {return_alias}"
+            )  # noqa: F501
+
+        return_clause_str = "RETURN " + ", ".join(return_expressions)
+
+        # 6. Assemble the final Cypher Query
+        cypher_query = f"{match_clause}{where_clause_str} {return_clause_str}"
+        logging.info(f"Manually constructed Cypher query: {cypher_query}")
+        print("Neo4j-join-cypher-query", cypher_query)
+        # 7. Execute and return results
+        async with driver.session() as s:
+            result = await s.run(cypher_query, **params)
+            # FIX: Use an async list comprehension
+            # to correctly iterate the AsyncResult
+            return [dict(record) async for record in result]

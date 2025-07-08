@@ -20,6 +20,7 @@ flask-cors        = "6.0.0"
 redis             = "^5.0"
 neo4j             = "^5.20"
 requests = "2.32.4"
+urllib3 = "2.5.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest          = "^8.3.5"
