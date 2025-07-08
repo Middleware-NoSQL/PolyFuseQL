@@ -15,7 +15,7 @@ class RedisConnector(Connector):
         keys = await r.keys(f"{entity}:*")
         if not keys:
             return []
-        print("REDIS-get_all-keys", keys)
+        logging.info("REDIS-get_all-keys", keys)
         data_type = self._options.get("data_type", "string")
         msg = f"Unsupported data type:{data_type}"
         all_list = []
@@ -140,7 +140,7 @@ class RedisConnector(Connector):
     async def delete(self, namespace: str, pk_col: str, pk_val: Any) -> int:
         r = self._get_client()
         key = f"{namespace}:{pk_val}"
-        print("redis-delete-key", key)
+        logging.info("redis-delete-key", key)
         deleted_count = await r.delete(key)
         return deleted_count
 
@@ -150,8 +150,8 @@ class RedisConnector(Connector):
         r = self._get_client()
         key = f"{namespace}:{pk_val}"
         data_type = self._options.get("data_type", "string")
-        print("redis-update-key", key)
-        print("redis-update-value", payload)
+        logging.info("redis-update-key", key)
+        logging.info("redis-update-value", payload)
         if not await r.exists(key):
             return 0
 
@@ -159,13 +159,13 @@ class RedisConnector(Connector):
             case "string":
                 # Inefficient Read-Modify-Write for string-encoded JSON
                 raw = await r.get(key)
-                print("redis-string-raw", raw)
+                logging.info("redis-string-raw", raw)
                 if not raw:
                     return 0
                 data = json.loads(raw)
-                print("redis-string-json", data)
+                logging.info("redis-string-json", data)
                 data.update(payload)
-                print("redis-string-json-updated", data)
+                logging.info("redis-string-json-updated", data)
                 await r.set(key, json.dumps(data))
                 return 1
             case "hash":
@@ -194,19 +194,19 @@ class RedisConnector(Connector):
 
         left_table = left_table_expr.this.name
         right_table = right_table_expr.this.name
-        print("redis-join-left_table", left_table)
-        print("redis-join-right_table", right_table)
+        logging.info("redis-join-left_table", left_table)
+        logging.info("redis-join-right_table", right_table)
         left_join_col = on_condition.this.this.name
         right_join_col = on_condition.expression.this.name
-        print("redis-join-left_join_col", left_join_col)
-        print("redis-join+right_join_col", right_join_col)
+        logging.info("redis-join-left_join_col", left_join_col)
+        logging.info("redis-join+right_join_col", right_join_col)
 
         # 2. Fetch all data from both namespaces
         left_rows = await self.get_all(left_table)
         right_rows = await self.get_all(right_table)
 
-        print("redis-join-left_rows", left_rows)
-        print("redis-join-right_rows", right_rows)
+        logging.info("redis-join-left_rows", left_rows)
+        logging.info("redis-join-right_rows", right_rows)
 
         # 3. Create a lookup map for the right side of the join for efficiency
         right_map = {str(row.get(right_join_col)): row for row in right_rows}

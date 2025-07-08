@@ -1,3 +1,5 @@
+import logging
+
 from polyfuseql.strategy.Query import QueryStrategy
 from sqlglot import exp
 
@@ -28,8 +30,8 @@ class InsertStrategy(QueryStrategy):
         else:
             table = table_name
 
-        print("insert-strategy-table", table)
-        print("insert-strategy-table-type", type(table))
+        logging.info("insert-strategy-table", table)
+        logging.info("insert-strategy-table-type", type(table))
 
         columns = [col.name for col in ast.this.expressions]
 
@@ -44,6 +46,6 @@ class InsertStrategy(QueryStrategy):
 
         payload = dict(zip(columns, values))
         conn = client.backends[backend]
-        print("insert-strategy-payload", payload)
-        print("insert-strategy-table", table)
+        logging.info("insert-strategy-payload", payload)
+        logging.info("insert-strategy-table", table)
         return await conn.insert(table, payload)

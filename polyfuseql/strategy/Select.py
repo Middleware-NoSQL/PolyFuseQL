@@ -1,3 +1,5 @@
+import logging
+
 from polyfuseql.strategy.Query import QueryStrategy
 from sqlglot import exp
 
@@ -9,9 +11,9 @@ class SelectStrategy(QueryStrategy):
             raise ValueError(f"Connector for backend '{backend}' not found.")
 
         table_name = ast.find(exp.Table).name
-        print("select-strategy-get-table_name", table_name)
-        print("select-strategy-get-table_name-type", type(table_name))
-        print("select-strategy-get-use_catalogue", use_catalogue)
+        logging.info("select-strategy-get-table_name", table_name)
+        logging.info("select-strategy-get-table_name-type", type(table_name))
+        logging.info("select-strategy-get-use_catalogue", use_catalogue)
 
         where_expr = ast.args.get("where").this
         if use_catalogue:
@@ -19,7 +21,7 @@ class SelectStrategy(QueryStrategy):
             _, pk_col = catalogue_entry
         else:
             pk_col = str(where_expr.left.this)
-        print("select-strategy-get-pk_col", pk_col)
+        logging.info("select-strategy-get-pk_col", pk_col)
 
         # --- START: Corrected Primary Key Value Extraction ---
         lit_expr = where_expr.right

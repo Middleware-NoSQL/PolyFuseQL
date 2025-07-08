@@ -121,7 +121,7 @@ class PolyClient:
         if not backend:
             backend, source = _MAPPING[logical]
         source = logical
-        print(backend, source)
+        logging.info(backend, source)
         match backend:
             case "pg":
                 return await self.pg.count(source)
@@ -178,9 +178,9 @@ class PolyClient:
         # Use the physical table name (which might be different) if available,
         # otherwise default to the logical name.
         physical_table = _ROUTER.get(logical_table, (None, logical_table))[1]
-        print("polyclient-get-physical_table", physical_table)
-        print("polyclient-get-pk_col", pk_col)
-        print("polyclient-get-pk_val", pk_val)
+        logging.info("polyclient-get-physical_table", physical_table)
+        logging.info("polyclient-get-pk_col", pk_col)
+        logging.info("polyclient-get-pk_val", pk_val)
         obj = await conn.get(physical_table, pk_col, pk_val)
         return obj
 
@@ -281,10 +281,10 @@ class PolyClient:
                 raise ValueError(msg)
             target_backend = catalogue_backend
 
-        print("polyclient-execute-use_catalogue", use_catalogue)
-        print("polyclient-execute-ast", ast.find(exp.Table).name)
-        print("polyclient-execute-query", sql)
-        print("polyclient-execute-strategy", str(strategy.__class__))
+        logging.info("polyclient-execute-use_catalogue", use_catalogue)
+        logging.info("polyclient-execute-ast", ast.find(exp.Table).name)
+        logging.info("polyclient-execute-query", sql)
+        logging.info("polyclient-execute-strategy", str(strategy.__class__))
         if not target_backend:
             # This case should now be unreachable due to the initial check
             raise ValueError("Could not determine target backend.")

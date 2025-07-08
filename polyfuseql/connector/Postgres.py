@@ -69,14 +69,14 @@ class PostgresConnector(Connector):
 
         query = "SELECT row_to_json(t) FROM "
         query += f" {table} t WHERE {pk_col} = $1"  # noqa: F501
-        print("postgres-conector-get-query", query)
-        print("postgres-conector-get-pk_val", pk_val)
-        print("postgres-conector-get-pk_val-type", type(pk_val))
+        logging.info("postgres-conector-get-query", query)
+        logging.info("postgres-conector-get-pk_val", pk_val)
+        logging.info("postgres-conector-get-pk_val-type", type(pk_val))
         row = await conn.fetchrow(query, pk_val)
         if not row:
             return {}
-        print("Postgres-get-row", row)
-        print("Postgres-get-row-get", row.get("row_to_json"))
+        logging.info("Postgres-get-row", row)
+        logging.info("Postgres-get-row-get", row.get("row_to_json"))
         data = json.loads(row.get("row_to_json"))
         return _camelize_keys(data) if data else {}
 

@@ -68,9 +68,9 @@ class Neo4jConnector(Connector):
                 + cypher_where
                 + "= $pk_val RETURN properties(n) AS p LIMIT 1"
             )
-            print("Neo4j-con-get-cypher", cypher)
-            print("Neo4j-con-get-pk_val", pk_val)
-            print("Neo4j-con-get-pk_val-type", type(pk_val))
+            logging.info("Neo4j-con-get-cypher", cypher)
+            logging.info("Neo4j-con-get-pk_val", pk_val)
+            logging.info("Neo4j-con-get-pk_val-type", type(pk_val))
             result = await s.run(cypher, pk_val=pk_val)
             rec = await result.single()
             return rec["p"] if rec and rec["p"] else {}
@@ -171,7 +171,7 @@ class Neo4jConnector(Connector):
         # 6. Assemble the final Cypher Query
         cypher_query = f"{match_clause}{where_clause_str} {return_clause_str}"
         logging.info(f"Manually constructed Cypher query: {cypher_query}")
-        print("Neo4j-join-cypher-query", cypher_query)
+        logging.info("Neo4j-join-cypher-query", cypher_query)
         # 7. Execute and return results
         async with driver.session() as s:
             result = await s.run(cypher_query, **params)
