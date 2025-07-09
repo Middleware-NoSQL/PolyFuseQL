@@ -68,9 +68,9 @@ class Neo4jConnector(Connector):
                 + cypher_where
                 + "= $pk_val RETURN properties(n) AS p LIMIT 1"
             )
-            logging.info("Neo4j-con-get-cypher", cypher)
-            logging.info("Neo4j-con-get-pk_val", pk_val)
-            logging.info("Neo4j-con-get-pk_val-type", type(pk_val))
+            print("Neo4j-con-get-cypher", cypher)
+            print("Neo4j-con-get-pk_val", pk_val)
+            print("Neo4j-con-get-pk_val-type", type(pk_val))
             result = await s.run(cypher, pk_val=pk_val)
             rec = await result.single()
             return rec["p"] if rec and rec["p"] else {}

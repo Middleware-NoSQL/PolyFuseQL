@@ -14,7 +14,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Dict, List, Tuple, Union, Sequence, Any
+from typing import Dict, List, Tuple, Union, Sequence, Any, Optional
 
 __all__ = [
     "PolyClient",
@@ -133,56 +133,63 @@ class PolyClient:
                 raise ValueError(f"Unknown backend: {backend}")
 
     async def get(
-        self, logical_table: str, pk_val: Any, engine: str = None
-    ) -> Dict:  # npqa: F501
+        self,
+        table_name: str,
+        primary_key_value: Any,
+        primary_key_column: Optional[str] = None,
+        engine: Optional[str] = None,
+    ) -> Dict:
         """
-        Fetches a single record by its logical table name and
-        primary key value.
-        It uses the Catalogue to determine the backend and primary key column.
+        Fetches a single record by its primary key.
+
+        This method can operate in two modes:
+        1.  **Direct Mode**: Provide 'engine' and 'primary_key_column' to query
+            a backend directly without relying on the catalogue.
+        2.  **Catalogue-Assisted Mode**: Omit 'engine'
+            and/or 'primary_key_column'
+            to look up the missing information from the catalogue.
 
         Args:
-            logical_table: The logical name of the table
-            (e.g., 'customers').
-            pk_val: The value of the primary key to look up.
-            engine: (Optional) A specific backend to target,
-            bypassing the catalogue.
+            table_name: The name of the table or entity.
+            primary_key_value: The value of the primary key to find.
+            primary_key_column: (Optional) The name of the primary key column.
+            engine: (Optional) The database engine to target.
 
         Returns:
-            A dictionary representing the record, or an empty dict if not found
+            A dictionary representing the record, or an
+            empty dict if not found.
         """
+        target_engine = engine
+        target_pk_col = primary_key_column
 
-        if engine:
-            backend = engine
+        # Use the catalogue as a fallback if information is missing
+        if not target_engine or not target_pk_col:
+            catalogue_entry = self._catalogue.get(table_name.lower())
+            if catalogue_entry:
+                # Fill in missing details from the catalogue
+                if not target_engine:
+                    target_engine = catalogue_entry[0]
+                if not target_pk_col:
+                    target_pk_col = catalogue_entry[1]
 
-            if logical_table not in self._catalogue:
-                logging.warning(
-                    f"Table '{logical_table}' not in catalogue; "
-                    f"cannot determine PK column for specified engine. "
-                    f"Using {logical_table} instead."
-                )
-                pk_col = logical_table
-            else:
-                _, pk_col = self._catalogue[logical_table]
-        else:
-            # Look up backend and pk_col from the catalogue
-            catalogue_entry = self._catalogue.get(logical_table)
-            if not catalogue_entry:
-                msg = f"Table '{logical_table}' not found in catalogue."
-                raise ValueError(msg)
-            backend, pk_col = catalogue_entry
+        # Final validation to ensure we have all necessary information
+        if not target_engine:
+            msg = "An 'engine' must be provided, or "
+            msg += f"'{table_name}' must exist in the catalogue."
+            raise ValueError(msg)
+        if not target_pk_col:
+            msg = "'primary_key_column' must be provided, or "
+            msg += f"'{table_name}' must exist in the catalogue."
+            raise ValueError(msg)
 
-        conn = self.backends.get(backend)
+        conn = self.backends.get(target_engine)
         if not conn:
-            raise ValueError(f"Unknown backend '{backend}'")
+            raise ValueError(f"Unknown backend '{target_engine}'")
 
-        # Use the physical table name (which might be different) if available,
-        # otherwise default to the logical name.
-        physical_table = _ROUTER.get(logical_table, (None, logical_table))[1]
-        logging.info("polyclient-get-physical_table", physical_table)
-        logging.info("polyclient-get-pk_col", pk_col)
-        logging.info("polyclient-get-pk_val", pk_val)
-        obj = await conn.get(physical_table, pk_col, pk_val)
-        return obj
+        # The physical table name is provided directly by the user.
+        # The connector's .get() method is already
+        # clean and requires these three arguments.
+        return await conn.get(table_name, target_pk_col, primary_key_value)
 
         # ---------------------------------------------------------------------
         # NEW: SQL router  (MVP)

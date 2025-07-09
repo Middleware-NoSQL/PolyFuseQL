@@ -22,7 +22,12 @@ async def test_delete_from_redis():
         await client.execute(insert_sql, engine="redis")
 
         # Confirm it exists before deleting
-        doc = await client.get("Customer", customer_id, "redis")
+        doc = await client.get(
+            "Customer",
+            customer_id,
+            primary_key_column="customerID",
+            engine="redis",  # noqa: F501
+        )
         print("test-delete-from-redis-doc", doc)
         assert doc["companyName"] == company_name
 
@@ -34,6 +39,11 @@ async def test_delete_from_redis():
         assert delete_result["deleted_count"] >= 1
 
         # Assert: Verify the record is gone by trying to get it again.
-        deleted_doc = await client.get("Customer", customer_id, "redis")
+        deleted_doc = await client.get(
+            "Customer",
+            customer_id,
+            primary_key_column="customerID",
+            engine="redis",  # noqa: F501
+        )
         msg = "The record should have been deleted, but was found."
         assert not deleted_doc, msg

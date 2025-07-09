@@ -3,7 +3,7 @@ import pathlib
 from typing import Tuple
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent  # repo root guess
-DEFAULT_MAPPING: dict[str, Tuple[str, str]] = {
+DEFAULT_MAPPING_OLD: dict[str, Tuple[str, str]] = {
     # table : (backend, pkCol)
     # Corrected PK names to match the actual data properties
     "customers": ("postgres", "customer_id"),
@@ -15,7 +15,7 @@ DEFAULT_MAPPING: dict[str, Tuple[str, str]] = {
     "product": ("neo4j", "productID"),  # Neo4j uses productID
     "person": ("neo4j", "id"),  # Added for the insert test
 }
-DEFAULT_MAPPING_NEW = {}
+DEFAULT_MAPPING = {}
 
 
 class Catalogue(dict):

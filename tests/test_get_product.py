@@ -15,7 +15,12 @@ async def test_query_product_postgres():
 @pytest.mark.asyncio
 async def test_get_product_redis_string_by_default():
     async with PolyClient() as c:
-        doc = await c.get("Product", "1:1:1:string", "redis")
+        doc = await c.get(
+            "Product",
+            "1:1:1:string",
+            primary_key_column="customerID",
+            engine="redis",  # noqa: F501
+        )
         print("doc", doc)
         assert doc["productName"] == "Product HHYDP"
 
@@ -23,7 +28,12 @@ async def test_get_product_redis_string_by_default():
 @pytest.mark.asyncio
 async def test_get_product_redis_hash():
     async with PolyClient({"data_type": "hash"}) as c:
-        doc = await c.get("Product", "1:1:1:hash", "redis")
+        doc = await c.get(
+            "Product",
+            "1:1:1:hash",
+            primary_key_column="customerID",
+            engine="redis",  # noqa: F501
+        )
         print("doc", doc)
         assert doc["productName"] == "Product HHYDP"
 
@@ -31,7 +41,12 @@ async def test_get_product_redis_hash():
 @pytest.mark.asyncio
 async def test_get_product_redis_json():
     async with PolyClient({"data_type": "json"}) as c:
-        doc = await c.get("Product", "1:1:1:json", "redis")
+        doc = await c.get(
+            "Product",
+            "1:1:1:json",
+            primary_key_column="customerID",
+            engine="redis",  # noqa: F501
+        )
         print("doc", doc)
         assert doc["productName"] == "Product HHYDP"
 
@@ -40,5 +55,7 @@ async def test_get_product_redis_json():
 async def test_get_product_neo4j():
     async with PolyClient() as c:
         # Use the logical name from the catalogue
-        doc = await c.get("product", "1", "neo4j")
+        doc = await c.get(
+            "product", "1", primary_key_column="productID", engine="neo4j"
+        )
         assert doc["productName"] == "Chai"

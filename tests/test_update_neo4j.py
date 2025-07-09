@@ -27,5 +27,7 @@ async def test_update_neo4j():
         assert result["updated_count"] > 0
 
         # Assert: Verify the data was changed.
-        doc = await client.get("person", person_id)
+        doc = await client.get(
+            "person", person_id, primary_key_column="id", engine="neo4j"
+        )
         assert doc["name"] == updated_name

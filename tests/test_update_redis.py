@@ -28,6 +28,11 @@ async def test_update_redis(data_type):
         assert result["updated_count"] == 1
 
         # Assert
-        doc = await client.get("Customer", customer_id, engine="redis")
+        doc = await client.get(
+            "Customer",
+            customer_id,
+            primary_key_column="customerID",
+            engine="redis",  # noqa: F501
+        )
         assert doc is not None
         assert doc["companyName"] == updated_name

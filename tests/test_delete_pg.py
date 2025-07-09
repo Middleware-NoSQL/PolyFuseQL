@@ -32,6 +32,11 @@ async def test_delete_from_postgres():
         # Let's assume the Postgres query method will return a status.
 
         # Assert: Verify the record is gone.
-        deleted_doc = await client.get("customers", id, engine="postgres")
+        deleted_doc = await client.get(
+            "customers",
+            id,
+            primary_key_column="customer_id",
+            engine="postgres",  # noqa: F501
+        )
         msg = "The record should have been deleted, but was found."
         assert not deleted_doc, msg

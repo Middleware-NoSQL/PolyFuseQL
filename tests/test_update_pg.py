@@ -27,5 +27,10 @@ async def test_update_postgres():
         assert result["updated_count"] == 1
 
         # Assert: Fetch the record and verify the change.
-        doc = await client.get("customers", customer_id, engine="postgres")
+        doc = await client.get(
+            "customers",
+            customer_id,
+            primary_key_column="customer_id",
+            engine="postgres",
+        )
         assert doc["companyName"] == updated_name
