@@ -20,7 +20,7 @@ async def test_delete_from_neo4j():
         assert insert_result["id"] == person_id
 
         # Confirm it exists before deleting.
-        doc = await client.get("person", person_id)
+        doc = await client.get("person", person_id, engine="neo4j")
         assert doc["name"] == person_name
 
         # Act: Delete the node.

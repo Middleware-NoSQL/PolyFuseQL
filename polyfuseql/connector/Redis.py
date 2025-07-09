@@ -5,6 +5,7 @@ from polyfuseql.connector.Connector import Connector
 from polyfuseql.utils.utils import env
 import redis.asyncio as aioredis
 from sqlglot import exp
+import itertools
 
 
 class RedisConnector(Connector):
@@ -236,3 +237,41 @@ class RedisConnector(Connector):
                 joined_results.append({**left_row, **right_row})
 
         return joined_results
+
+    async def group_by(self, ast: exp.Select) -> List[Dict[str, Any]]:
+        """Performs an application-side GROUP BY on a Redis namespace."""
+
+        # 1. Deconstruct the AST
+        table_name = ast.find(exp.Table).name
+        group_by_col = ast.args.get("group").expressions[0].this.name
+
+        # Determine the aggregation function
+        agg_expr = ast.expressions[1]  # e.g., COUNT(*)
+        if not (
+            isinstance(agg_expr, exp.Alias)
+            and str(agg_expr).lower().startswith("count")
+        ):
+            raise NotImplementedError(
+                "Only COUNT(*) is supported for Redis GROUP BY."
+            )  # noqa: F501
+        agg_alias = agg_expr.alias_or_name
+
+        # 2. Fetch all data from the Redis namespace
+        all_data = await self.get_all(table_name)
+        if not all_data:
+            return []
+
+        # 3. Perform the group by in Python
+        # Sort data to prepare for itertools.groupby
+        all_data.sort(key=lambda x: x.get(group_by_col))
+
+        results = []
+        # Group records by the specified column
+        for key, group in itertools.groupby(
+            all_data, key=lambda x: x.get(group_by_col)
+        ):
+            # Count the items in each group
+            count = len(list(group))
+            results.append({group_by_col: key, agg_alias: count})
+
+        return results

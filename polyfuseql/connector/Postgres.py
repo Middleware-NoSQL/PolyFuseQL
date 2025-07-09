@@ -138,3 +138,9 @@ class PostgresConnector(Connector):
         result = await conn.execute(query, *values)
         deleted_count = int(result.split(" ")[1])
         return deleted_count
+
+    async def group_by(self, ast: exp.Select) -> List[Dict[str, Any]]:
+        """Executes a native SQL GROUP BY query."""
+        # We can directly use the query method as
+        # it passes the raw SQL to Postgres
+        return await self.query(ast.sql())

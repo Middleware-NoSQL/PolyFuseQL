@@ -178,3 +178,47 @@ class Neo4jConnector(Connector):
             # FIX: Use an async list comprehension
             # to correctly iterate the AsyncResult
             return [dict(record) async for record in result]
+
+    async def group_by(self, ast: exp.Select) -> List[Dict[str, Any]]:
+        """Manually translates a SQL GROUP BY to a Cypher aggregation query."""
+        driver = self._get_driver()
+
+        # 1. Deconstruct the AST
+        table_name = ast.find(exp.Table).name.capitalize()
+        match_clause = f"MATCH (n:{table_name})"
+
+        # 2. Build the RETURN clause from the
+        # GROUP BY and aggregation expressions
+        return_expressions = []
+        for expr in ast.expressions:
+            logging.info("============================")
+            logging.info("neo4j-group-by-expr", expr)
+            logging.info("neo4j-group-by-expr-instance", type(expr))
+            logging.info("============================")
+            if isinstance(expr, exp.Alias) and str(expr).lower().startswith(
+                "count"
+            ):  # noqa: F501
+                # It's an aggregation function,
+                # e.g., COUNT(*) AS customer_count
+                alias = expr.alias_or_name
+                return_expressions.append(f"count(n) AS {alias}")
+            elif isinstance(expr, exp.Column):
+                # It's a grouping key, e.g., "country"
+                col_name = expr.this.name
+                return_expressions.append(f"n.{col_name} AS {col_name}")
+
+        if not return_expressions:
+            raise ValueError(
+                "GROUP BY query must have columns or aggregations in SELECT."
+            )
+
+        return_clause = "RETURN " + ", ".join(return_expressions)
+
+        # 3. Assemble and run the query
+        cypher_query = f"{match_clause} {return_clause}"
+        msg = f"neo4j-Manually constructed GROUP BY query: {cypher_query}"
+        logging.info(msg)
+
+        async with driver.session() as s:
+            result = await s.run(cypher_query)
+            return [dict(record) async for record in result]

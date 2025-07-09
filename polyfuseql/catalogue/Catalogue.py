@@ -15,6 +15,7 @@ DEFAULT_MAPPING: dict[str, Tuple[str, str]] = {
     "product": ("neo4j", "productID"),  # Neo4j uses productID
     "person": ("neo4j", "id"),  # Added for the insert test
 }
+DEFAULT_MAPPING_NEW = {}
 
 
 class Catalogue(dict):

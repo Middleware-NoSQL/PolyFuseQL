@@ -66,3 +66,8 @@ class Connector(ABC):
     ) -> List[dict[str, Any]]:  # noqa: F501
         """Executes a raw SQL-like query."""
         pass
+
+    @abstractmethod
+    async def group_by(self, ast: exp.Select) -> List[Dict[str, Any]]:
+        """Executes a GROUP BY query and returns the aggregated results."""
+        pass
