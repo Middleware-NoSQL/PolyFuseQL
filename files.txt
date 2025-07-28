@@ -1,0 +1,169 @@
+.
+├── console
+│   ├── cli.py
+│   ├── completer.py
+│   ├── __init__.py
+│   ├── main.py
+│   ├── __pycache__
+│   │   ├── cli.cpython-312.pyc
+│   │   ├── completer.cpython-312.pyc
+│   │   ├── __init__.cpython-312.pyc
+│   │   ├── shell.cpython-312.pyc
+│   │   └── state.cpython-312.pyc
+│   ├── shell.py
+│   └── state.py
+├── coverage.xml
+├── docker
+│   ├── dbgen
+│   │   └── Dockerfile
+│   ├── neo4j
+│   │   └── init
+│   │       ├── 01_tpch_indexes.cypher
+│   │       ├── fetch.sh
+│   │       └── seed.cypher
+│   ├── postgres
+│   │   ├── 01-schema.sql
+│   │   └── init
+│   │       ├── 01_northwind_mod
+│   │       ├── 01_northwind.sql
+│   │       ├── 01_tpch_schema.sql
+│   │       └── LICENCE.mspl
+│   └── redis
+│       └── init
+│           ├── build_seed.sh
+│           ├── fetch.sh
+│           ├── northwind.json
+│           └── seed.redis
+├── docker-compose.yml
+├── files.txt
+├── LICENSE
+├── poetry.lock
+├── polyfuseql
+│   ├── catalogue
+│   │   ├── Catalogue.py
+│   │   ├── __init__.py
+│   │   ├── mapping.json
+│   │   ├── mapping_old.json
+│   │   └── __pycache__
+│   │       ├── Catalogue.cpython-312.pyc
+│   │       └── __init__.cpython-312.pyc
+│   ├── client
+│   │   ├── __init__.py
+│   │   ├── PolyClient.py
+│   │   └── __pycache__
+│   │       ├── __init__.cpython-312.pyc
+│   │       ├── __init__.cpython-313.pyc
+│   │       ├── PolyClient.cpython-312.pyc
+│   │       └── PolyClient.cpython-313.pyc
+│   ├── connector
+│   │   ├── ConnectorFactory.py
+│   │   ├── Connector.py
+│   │   ├── __init__.py
+│   │   ├── Neo4j.py
+│   │   ├── Postgres.py
+│   │   ├── __pycache__
+│   │   │   ├── Connector.cpython-312.pyc
+│   │   │   ├── ConnectorFactory.cpython-312.pyc
+│   │   │   ├── __init__.cpython-312.pyc
+│   │   │   ├── Neo4j.cpython-312.pyc
+│   │   │   ├── Postgres.cpython-312.pyc
+│   │   │   └── Redis.cpython-312.pyc
+│   │   └── Redis.py
+│   ├── __init__.py
+│   ├── __pycache__
+│   │   ├── __init__.cpython-312.pyc
+│   │   └── __init__.cpython-313.pyc
+│   ├── strategy
+│   │   ├── Delete.py
+│   │   ├── __init__.py
+│   │   ├── Insert.py
+│   │   ├── Join.py
+│   │   ├── __pycache__
+│   │   │   ├── Delete.cpython-312.pyc
+│   │   │   ├── __init__.cpython-312.pyc
+│   │   │   ├── Insert.cpython-312.pyc
+│   │   │   ├── Join.cpython-312.pyc
+│   │   │   ├── Query.cpython-312.pyc
+│   │   │   ├── Select.cpython-312.pyc
+│   │   │   └── Update.cpython-312.pyc
+│   │   ├── Query.py
+│   │   ├── Select.py
+│   │   └── Update.py
+│   └── utils
+│       ├── __init__.py
+│       ├── __pycache__
+│       │   ├── __init__.cpython-312.pyc
+│       │   └── utils.cpython-312.pyc
+│       └── utils.py
+├── pyproject.toml
+├── README.md
+├── scripts
+│   ├── 00_restart_and_populate.sh
+│   ├── collect_snapshot.sh
+│   ├── commands.sh
+│   ├── console_commands.csv
+│   ├── snapshot_20250518_212845.txt
+│   └── tpc_h_queries.csv
+├── snapshot_20250518_212922.txt
+├── snapshot_20250522_154436.txt
+├── snapshot_20250527_012928.txt
+├── snapshot_20250610_113321.txt
+├── snapshot_20250610_171903.txt
+├── snapshot_20250611_102538.txt
+├── snapshot_20250611_165210.txt
+├── snapshot_20250612_154610.txt
+├── snapshot_20250702_152703.txt
+├── snapshot_20250708_143030.txt
+├── snapshot_20250709_140910.txt
+├── snapshot_20250709_153114.txt
+├── snapshot_20250720_180438.txt
+├── tests
+│   ├── __pycache__
+│   │   ├── test_basic_count.cpython-312-pytest-8.3.5.pyc
+│   │   ├── test_connectivity.cpython-312.pyc
+│   │   ├── test_connectivity.cpython-312-pytest-8.3.5.pyc
+│   │   ├── test_connectivity.cpython-313-pytest-8.3.5.pyc
+│   │   ├── test_delete_neo4j.cpython-312-pytest-8.3.5.pyc
+│   │   ├── test_delete_pg.cpython-312-pytest-8.3.5.pyc
+│   │   ├── test_delete_redis.cpython-312-pytest-8.3.5.pyc
+│   │   ├── test_get_customer.cpython-312-pytest-8.3.5.pyc
+│   │   ├── test_get_product.cpython-312-pytest-8.3.5.pyc
+│   │   ├── test_group_by.cpython-312-pytest-8.3.5.pyc
+│   │   ├── test_insert_neo4j.cpython-312-pytest-8.3.5.pyc
+│   │   ├── test_insert_pg.cpython-312-pytest-8.3.5.pyc
+│   │   ├── test_insert_redis.cpython-312-pytest-8.3.5.pyc
+│   │   ├── test_joins.cpython-312-pytest-8.3.5.pyc
+│   │   ├── test_query_customer.cpython-312-pytest-8.3.5.pyc
+│   │   ├── test_query_customer_neo4j.cpython-312-pytest-8.3.5.pyc
+│   │   ├── test_query_errors.cpython-312-pytest-8.3.5.pyc
+│   │   ├── test_query_include_source.cpython-312-pytest-8.3.5.pyc
+│   │   ├── test_query_multi_backends.cpython-312-pytest-8.3.5.pyc
+│   │   ├── test_query_product.cpython-312-pytest-8.3.5.pyc
+│   │   ├── test_query_unsopported.cpython-312-pytest-8.3.5.pyc
+│   │   ├── test_sanity.cpython-312-pytest-8.3.5.pyc
+│   │   ├── test_sanity.cpython-313-pytest-8.3.5.pyc
+│   │   ├── test_update_neo4j.cpython-312-pytest-8.3.5.pyc
+│   │   ├── test_update_pg.cpython-312-pytest-8.3.5.pyc
+│   │   └── test_update_redis.cpython-312-pytest-8.3.5.pyc
+│   ├── test_connectivity.py
+│   ├── test_delete_neo4j.py
+│   ├── test_delete_pg.py
+│   ├── test_delete_redis.py
+│   ├── test_get_customer.py
+│   ├── test_get_product.py
+│   ├── test_group_by.py
+│   ├── test_insert_neo4j.py
+│   ├── test_insert_pg.py
+│   ├── test_insert_redis.py
+│   ├── test_joins.py
+│   ├── test_query_customer_neo4j.py
+│   ├── test_query_customer.py
+│   ├── test_query_errors.py
+│   ├── test_query_product.py
+│   ├── test_query_unsopported.py
+│   ├── test_update_neo4j.py
+│   ├── test_update_pg.py
+│   └── test_update_redis.py
+└── User_stories.md
+
+26 directories, 141 files
