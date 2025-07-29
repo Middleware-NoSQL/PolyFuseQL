@@ -1,7 +1,9 @@
 # ruff: noqa: F401
 import logging
+import os
 from typing import Dict, Any, Optional, List
 from polyfuseql.connector.Connector import Connector
+from polyfuseql.utils.tpch_schema import TPCH_SCHEMA
 from neo4j import AsyncGraphDatabase as AGD, AsyncDriver
 from polyfuseql.utils.utils import env
 from sqlglot import exp
@@ -222,3 +224,31 @@ class Neo4jConnector(Connector):
         async with driver.session() as s:
             result = await s.run(cypher_query)
             return [dict(record) async for record in result]
+
+    async def bulk_insert(self, table_name: str, file_path: str) -> int:
+        """
+        Performs a high-performance bulk insert using Neo4j's LOAD CSV command.
+        """
+        driver = self._get_driver()
+        schema = TPCH_SCHEMA.get(table_name.lower())
+        if not schema:
+            raise ValueError(f"No schema definition found for table: {table_name}")
+
+        columns = schema["columns"]
+        label = table_name.capitalize()
+        file_name = os.path.basename(file_path)
+
+        # Construct the SET clause for the Cypher query
+        set_clauses = [f"n.{col} = row[{i}]" for i, col in enumerate(columns)]
+        set_clause_str = ", ".join(set_clauses)
+
+        # Construct the full LOAD CSV query
+        cypher_query = f"""
+        LOAD CSV FROM 'file:///{file_name}' AS row FIELDTERMINATOR '|'
+        CREATE (n:{label})
+        SET {set_clause_str}
+        """
+
+        async with driver.session() as s:
+            summary = await s.run(cypher_query)
+            return summary.counters.nodes_created

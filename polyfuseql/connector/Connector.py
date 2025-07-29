@@ -71,3 +71,11 @@ class Connector(ABC):
     async def group_by(self, ast: exp.Select) -> List[Dict[str, Any]]:
         """Executes a GROUP BY query and returns the aggregated results."""
         pass
+
+    @abstractmethod
+    async def bulk_insert(self, table_name: str, file_path: str) -> int:
+        """
+        Bulk inserts data from a file into the specified table.
+        Returns the number of records inserted.
+        """
+        pass

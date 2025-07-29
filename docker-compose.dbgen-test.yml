@@ -1,0 +1,25 @@
+# docker-compose.dbgen-test.yml
+# A minimal file to test only the TPC-H data generation service.
+#
+# How to use:
+# 1. Make sure your local './docker/tpch-data' directory exists.
+# 2. Run: docker-compose -f docker-compose.dbgen-test.yml up --build
+# 3. Check if the .tbl files appear in './docker/tpch-data'.
+
+services:
+  dbgen:
+    build: ./docker/dbgen
+    container_name: tpch_dbgen_test
+    # This service now runs as root internally to create files,
+    # then changes ownership back to the host user.
+    volumes:
+      # Use a bind mount to the local filesystem for easy access.
+      # Ensure the local directory ./docker/tpch-data exists.
+      - ./docker/tpch-data:/data
+    entrypoint: /bin/sh
+    # The command now does three things:
+    # 1. Copies dists.dss into the working directory.
+    # 2. Runs dbgen to generate the .tbl files (as root).
+    # 3. Changes the ownership of all generated files to match the host user's ID.
+    #    This is the key fix for the permission denied error.
+    command: -c "cp /usr/local/bin/dists.dss /data && cd /data && /usr/local/bin/dbgen -s 1 -f -v && chown ${UID:-1000}:${GID:-1000} ./*"

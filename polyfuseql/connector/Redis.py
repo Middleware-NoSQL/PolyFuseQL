@@ -3,9 +3,11 @@ import logging
 from typing import Dict, Any, Optional, List
 from polyfuseql.connector.Connector import Connector
 from polyfuseql.utils.utils import env
+from polyfuseql.utils.tpch_schema import TPCH_SCHEMA
 import redis.asyncio as aioredis
 from sqlglot import exp
 import itertools
+import csv
 
 
 class RedisConnector(Connector):
@@ -39,7 +41,7 @@ class RedisConnector(Connector):
         super().__init__(options)
         self._host = env("REDIS_HOST", "localhost")
         self._port = int(env("REDIS_PORT", "6379"))
-        self._password = env("REDIS_PASSWORD", "northwind")
+        self._password = env("REDIS_PASSWORD", "tpch")
         self._client: Optional[aioredis.Redis] = None
 
     async def connect(self) -> None:
@@ -75,8 +77,7 @@ class RedisConnector(Connector):
         total = 0
         cursor = 0
         while True:
-            cur = await r.scan(cursor=cursor, match=prefix, count=1000)
-            cursor, keys = cur
+            cursor, keys = await r.scan(cursor=cursor, match=prefix, count=1000)
             total += len(keys)
             if cursor == 0:
                 break
@@ -183,8 +184,6 @@ class RedisConnector(Connector):
                     f"Unsupported data type for update: {data_type}"
                 )
 
-            # In RedisConnector class
-
     async def join(self, ast: exp.Select) -> List[Dict[str, Any]]:
         """Performs an application-side INNER JOIN on two Redis namespaces."""
         # 1. Deconstruct the AST using the same robust logic as Neo4j
@@ -275,3 +274,45 @@ class RedisConnector(Connector):
             results.append({group_by_col: key, agg_alias: count})
 
         return results
+
+    async def bulk_insert(self, table_name: str, file_path: str) -> int:
+        r = self._get_client()
+        schema = TPCH_SCHEMA.get(table_name.lower())
+        if not schema:
+            raise ValueError(f"No schema definition found for table: {table_name}")
+
+        columns = schema["columns"]
+        pk_info = schema["pk"]
+
+        inserted_count = 0
+        batch_size = 10000
+
+        async with r.pipeline(transaction=False) as pipe:
+            with open(file_path, "r") as f:
+                reader = csv.reader(f, delimiter="|")
+                for i, row in enumerate(reader):
+                    if not row or len(row) <= 1:
+                        continue
+
+                    # Create a dictionary payload from the row
+                    payload = {col: val for col, val in zip(columns, row[:-1])}
+
+                    # Determine the primary key value
+                    if isinstance(pk_info, list):  # Composite key
+                        pk_val = ":".join([payload[k] for k in pk_info])
+                    else:
+                        pk_val = payload[pk_info]
+
+                    key = f"{table_name.capitalize()}:{pk_val}"
+
+                    # Using HSET for structured data storage
+                    pipe.hset(key, mapping=payload)
+
+                    if (i + 1) % batch_size == 0:
+                        await pipe.execute()
+
+                # Execute any remaining commands
+                await pipe.execute()
+                inserted_count = i + 1
+
+        return inserted_count

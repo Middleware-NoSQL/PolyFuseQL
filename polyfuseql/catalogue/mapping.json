@@ -1,2 +1,12 @@
 {
+  "region": { "backend": "postgres", "pk": "r_regionkey" },
+  "nation": { "backend": "postgres", "pk": "n_nationkey" },
+  "part": { "backend": "postgres", "pk": "p_partkey" },
+  "supplier": { "backend": "postgres", "pk": "s_suppkey" },
+  "partsupp": { "backend": "postgres", "pk": ["ps_partkey", "ps_suppkey"] },
+  "customer": { "backend": "postgres", "pk": "c_custkey" },
+  "orders": { "backend": "postgres", "pk": "o_orderkey" },
+  "lineitem": { "backend": "postgres", "pk": ["l_orderkey", "l_linenumber"] },
+  "user": { "backend": "redis", "pk": "id" },
+  "person": { "backend": "neo4j", "pk": "id" }
 }

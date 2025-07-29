@@ -297,3 +297,15 @@ class PolyClient:
             raise ValueError("Could not determine target backend.")
 
         return await strategy.execute(self, ast, target_backend, use_catalogue)
+
+    async def bulk_load_table(
+        self, table_name: str, file_path: str, engine: str
+    ) -> int:
+        """
+        Orchestrates bulk loading of a single TPC-H table to a specific backend.
+        """
+        connector = self.backends.get(engine)
+        if not connector:
+            raise ValueError(f"Unknown engine: {engine}")
+
+        return await connector.bulk_insert(table_name, file_path)
