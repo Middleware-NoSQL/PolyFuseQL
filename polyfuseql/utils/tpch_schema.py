@@ -99,3 +99,14 @@ TPCH_SCHEMA = {
         "pk": ["l_orderkey", "l_linenumber"],
     },
 }
+
+TPCH_TABLE_ORDER = [
+    "region",
+    "nation",
+    "supplier",
+    "customer",
+    "part",
+    "partsupp",
+    "orders",
+    "lineitem",
+]

@@ -1,0 +1,53 @@
+# docker-compose.neo4j-test.yml
+# A minimal file to test only the Neo4j bulk insert functionality.
+#
+# How to use:
+# 1. Save this file as `docker-compose.neo4j-test.yml` in your project root.
+# 2. Run: docker-compose -f docker-compose.neo4j-test.yml up --build -d
+# 3. Wait for the services to become healthy using ./scripts/wait-for-services.sh
+# 4. Run the specific pytest command:
+#    pytest -k test_bulk_insert_full_neo4j tests/test_bulk_insert_full.py
+
+services:
+  # ────────────── TPC-H Data Generator (DBGEN) ────────────── #
+  dbgen:
+    build: ./docker/dbgen
+    container_name: tpch_dbgen_test
+    volumes:
+      - ./docker/tpch-data:/data
+    entrypoint: /bin/sh
+    command: -c "cp /usr/local/bin/dists.dss /data && cd /data && /usr/local/bin/dbgen -s 1 -f -v && chown ${UID:-1000}:${GID:-1000} ./*"
+
+  # ────────────── Neo4j ────────────── #
+  neo4j:
+    image: neo4j:5-community
+    container_name: neo4j_graph_test
+    user: "${UID:-1000}:${GID:-1000}"
+    environment:
+      NEO4J_AUTH: neo4j/password
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_apoc_import_file_enabled: "true"
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+      NEO4J_server_directories_import: "/var/lib/neo4j/import"
+
+      # --- MEMORY CONFIGURATION FIX ---
+      # Corrected environment variable names based on official Neo4j 5.x documentation.
+      # Note the double underscores for settings that contain an underscore, e.g., initial_size -> initial__size.
+      NEO4J_server_memory_heap_initial__size: 6G
+      NEO4J_server_memory_heap_max__size: 6G
+      NEO4J_dbms_memory_transaction_total_max: 7G
+
+    volumes:
+      - ./docker/tpch-data:/var/lib/neo4j/import/tpch-data:ro
+      - ./tests/fixtures:/var/lib/neo4j/import/fixtures:ro
+    ports:
+      - "7687:7687"
+      - "7474:7474"
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p password 'RETURN 1' || exit 1"]
+      interval: 10s
+      timeout: 15s
+      retries: 20
+    depends_on:
+      dbgen:
+        condition: service_completed_successfully

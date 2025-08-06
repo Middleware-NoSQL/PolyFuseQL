@@ -21,7 +21,8 @@ jobs:
         up-flags: --build -d                 # similar to `docker compose up --build -d`
         # down-flags: --volumes              # add if you want volumes wiped
       # If you need env vars for Compose, add `env:` here.
-
+    - name: Wait for services to be healthy
+      run: ./scripts/wait-for-services.sh
     # Optional: show service list & last log lines (handy for CI debugging)
     - name: Show compose status
       run: |

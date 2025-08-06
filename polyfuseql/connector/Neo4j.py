@@ -231,24 +231,35 @@ class Neo4jConnector(Connector):
         """
         driver = self._get_driver()
         schema = TPCH_SCHEMA.get(table_name.lower())
+        msg = f"No schema definition found for table: {table_name}"
         if not schema:
-            raise ValueError(f"No schema definition found for table: {table_name}")
+            raise ValueError(msg)
 
         columns = schema["columns"]
         label = table_name.capitalize()
         file_name = os.path.basename(file_path)
+        # Construct the path relative to Neo4j's import directory
+        container_path = f"tpch-data/{file_name}"
+
+        # Clean the database before insertion for a consistent test environment
+        async with driver.session() as s:
+            await s.run(f"MATCH (n:{label}) DETACH DELETE n")
 
         # Construct the SET clause for the Cypher query
-        set_clauses = [f"n.{col} = row[{i}]" for i, col in enumerate(columns)]
+        set_clauses = [f"{col}: row[{i}]" for i, col in enumerate(columns)]
         set_clause_str = ", ".join(set_clauses)
 
         # Construct the full LOAD CSV query
-        cypher_query = f"""
-        LOAD CSV FROM 'file:///{file_name}' AS row FIELDTERMINATOR '|'
-        CREATE (n:{label})
-        SET {set_clause_str}
+        # The path is now relative to
+        # the container's configured import directory
+        msg = "CALL () {{ "
+        cypher_query = f"""{msg}
+        LOAD CSV FROM 'file:///{container_path}' AS row FIELDTERMINATOR '|'
+        CREATE (n:{label} {{ {set_clause_str} }})
+        }} IN TRANSACTIONS OF 1000 ROWS
         """
 
         async with driver.session() as s:
-            summary = await s.run(cypher_query)
+            result = await s.run(cypher_query)
+            summary = await result.consume()
             return summary.counters.nodes_created

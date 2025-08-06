@@ -1,11 +1,11 @@
 import json
 import logging
 import csv
+from datetime import datetime
 from typing import Dict, Any, Optional, List
 import asyncpg
 from polyfuseql.connector.Connector import Connector
 from polyfuseql.utils.utils import _camelize_keys, env, _snake_case
-from polyfuseql.utils.tpch_schema import TPCH_SCHEMA
 from sqlglot import exp
 
 
@@ -63,7 +63,7 @@ class PostgresConnector(Connector):
         row = await conn.fetchrow(query)
         return int(row["n"]) if row else 0
 
-    async def get(self, table: str, pk_col: str, pk_val: Any) -> Dict[str, Any]:
+    async def get(self, table: str, pk_col: str, pk_val: Any) -> Dict:
         conn = self._get_conn()
         query = f'SELECT row_to_json(t) FROM "{table}" t WHERE "{pk_col}" = $1'
         row = await conn.fetchrow(query, pk_val)
@@ -76,18 +76,21 @@ class PostgresConnector(Connector):
         self, sql: str, params: Optional[tuple] = None
     ) -> List[Dict[str, Any]]:
         conn = self._get_conn()
-        records = await conn.fetch(sql, *params) if params else await conn.fetch(sql)
+        if params:
+            records = await conn.fetch(sql, *params)
+        else:
+            records = await conn.fetch(sql)
+        # records = await conn.fetch(sql, *params)
+        # if params else await conn.fetch(sql)
         return [_camelize_keys(dict(r)) for r in records]
 
     async def insert(self, table: str, payload: Dict[str, Any]) -> Any:
         conn = self._get_conn()
         db_payload = {_snake_case(k): v for k, v in payload.items()}
         cols = ", ".join(f'"{k}"' for k in db_payload.keys())
-        placeholders = ", ".join(f"${i + 1}" for i in range(len(db_payload)))
+        ph = ", ".join(f"${i + 1}" for i in range(len(db_payload)))
         values = list(db_payload.values())
-        sql_query = (
-            f'INSERT INTO "{table}" ({cols}) VALUES ({placeholders}) RETURNING *'
-        )
+        sql_query = f'INSERT INTO "{table}" ({cols}) VALUES ({ph}) RETURNING *'
         row = await conn.fetchrow(sql_query, *values)
         return _camelize_keys(dict(row)) if row else {}
 
@@ -103,16 +106,16 @@ class PostgresConnector(Connector):
         self, table: str, pk_col: str, pk_val: Any, payload: Dict[str, Any]
     ) -> int:
         conn = self._get_conn()
-        db_pk_col = _snake_case(pk_col)
+        dpc = _snake_case(pk_col)
         set_clauses = []
         values = []
         for i, (key, value) in enumerate(payload.items()):
             db_key = _snake_case(key)
             set_clauses.append(f'"{db_key}" = ${i + 1}')
             values.append(value)
-        set_clause_str = ", ".join(set_clauses)
+        scs = ", ".join(set_clauses)
         values.append(pk_val)
-        query = f'UPDATE "{table}" SET {set_clause_str} WHERE "{db_pk_col}" = ${len(values)}'
+        query = f'UPDATE "{table}" SET {scs} WHERE "{dpc}" = ${len(values)}'
         result = await conn.execute(query, *values)
         updated_count = int(result.split(" ")[1])
         return updated_count
@@ -121,10 +124,11 @@ class PostgresConnector(Connector):
         return await self.query(ast.sql())
 
     # New implementation for the bulk_insert function to pass the test
-    async def bulk_insert(self, table_name: str, file_path: str) -> int:
+    async def bulk_insert(self, t_name: str, file_path: str) -> int:
         """
-        Performs a high-performance bulk insert using PostgreSQL's COPY command.
-        This version includes data type conversion based on the TPC-H schema to fix test errors.
+        Performs a high-performance bulk insert using PostgreSQL's COPY command
+        This version includes data type conversion based on the
+        TPC-H schema to fix test errors.
         """
         conn = self._get_conn()
 
@@ -136,14 +140,13 @@ class PostgresConnector(Connector):
                   AND table_name = $1
                 ORDER BY ordinal_position; \
                 """
-        db_columns_info = await conn.fetch(query, table_name.lower())
+        db_columns_info = await conn.fetch(query, t_name.lower())
+        msg = f"Could not find schema for table '{t_name}'. Does it exist?"
         if not db_columns_info:
-            raise ValueError(
-                f"Could not find schema for table '{table_name}'. Does it exist?"
-            )
+            raise ValueError(msg)
 
         type_map = {c["column_name"]: c["data_type"] for c in db_columns_info}
-        ordered_columns = [c["column_name"] for c in db_columns_info]
+        ord_col = [c["column_name"] for c in db_columns_info]
 
         def cast_value(value, col_name):
             col_type = type_map.get(col_name)
@@ -153,29 +156,30 @@ class PostgresConnector(Connector):
                 return int(value)
             if col_type in ("numeric", "decimal", "real", "double precision"):
                 return float(value)
+            if col_type == "date":
+                return datetime.strptime(value, "%Y-%m-%d").date()
+            if col_type == "timestamp":
+                return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
             return value
 
-        records_to_insert = []
+        recs_ins = []
         with open(file_path, "r") as f:
             reader = csv.reader(f, delimiter="|")
             for row in reader:
-                row_data = row[:-1]
-                if len(row_data) != len(ordered_columns):
-                    logging.warning(
-                        f"Skipping malformed row in {table_name}: {row_data}"
-                    )
+                row = row[:-1]
+                msg = f"Skipping malformed row in {t_name}: {row}"
+                if len(row) != len(ord_col):
+                    logging.warning(msg)
                     continue
 
                 processed_row = tuple(
-                    cast_value(val, col) for val, col in zip(row_data, ordered_columns)
+                    cast_value(val, col) for val, col in zip(row, ord_col)
                 )
-                records_to_insert.append(processed_row)
+                recs_ins.append(processed_row)
 
         async with conn.transaction():
             # For testing, ensure the table is clean before inserting
-            await conn.execute(f'TRUNCATE TABLE "{table_name.lower()}" CASCADE;')
-            await conn.copy_records_to_table(
-                table_name.lower(), records=records_to_insert
-            )
+            await conn.execute(f'TRUNCATE TABLE "{t_name.lower()}" CASCADE;')
+            await conn.copy_records_to_table(t_name.lower(), records=recs_ins)
 
-        return len(records_to_insert)
+        return len(recs_ins)

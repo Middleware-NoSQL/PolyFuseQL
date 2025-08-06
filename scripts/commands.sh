@@ -11,6 +11,7 @@ sudo docker-compose up -d            # crea y popula
 # Ver progreso de semillas
 sudo docker-compose logs -f redis-seed
 sudo docker-compose logs -f neo4j-seed
+sudo docker-compose logs -f dbgen
 
 # Pruebas rápidas
 echo "Testing postgres"

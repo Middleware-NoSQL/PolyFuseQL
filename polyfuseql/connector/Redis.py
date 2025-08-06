@@ -73,11 +73,11 @@ class RedisConnector(Connector):
 
     async def count(self, namespace: str) -> int:
         r = self._get_client()
-        prefix = f"{namespace.lower()}:*"
+        prfx = f"{namespace.capitalize()}:*"
         total = 0
         cursor = 0
         while True:
-            cursor, keys = await r.scan(cursor=cursor, match=prefix, count=1000)
+            cursor, keys = await r.scan(cursor=cursor, match=prfx, count=1000)
             total += len(keys)
             if cursor == 0:
                 break
@@ -277,15 +277,24 @@ class RedisConnector(Connector):
 
     async def bulk_insert(self, table_name: str, file_path: str) -> int:
         r = self._get_client()
+        await r.flushdb()
         schema = TPCH_SCHEMA.get(table_name.lower())
+        msg = f"No schema definition found for table: {table_name}"
         if not schema:
-            raise ValueError(f"No schema definition found for table: {table_name}")
+            raise ValueError(msg)
 
         columns = schema["columns"]
         pk_info = schema["pk"]
 
         inserted_count = 0
         batch_size = 10000
+
+        with open(file_path, "r") as f:
+            reader = csv.reader(f, delimiter="|")
+            for i, row in enumerate(reader):
+                if not row or len(row) <= 1:
+                    continue
+                inserted_count += 1
 
         async with r.pipeline(transaction=False) as pipe:
             with open(file_path, "r") as f:
@@ -311,8 +320,8 @@ class RedisConnector(Connector):
                     if (i + 1) % batch_size == 0:
                         await pipe.execute()
 
-                # Execute any remaining commands
+            # Execute any remaining commands
+            if (i + 1) % batch_size != 0:
                 await pipe.execute()
-                inserted_count = i + 1
 
         return inserted_count

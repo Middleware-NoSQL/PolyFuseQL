@@ -1,5 +1,5 @@
 # docker-compose.yml – TPC-H Benchmark Stack (Production Version)
-# This version integrates the corrected dbgen service with the full database stack.
+# This version integrates all corrections for data generation and database services.
 
 volumes:
   postgres-data:
@@ -10,21 +10,12 @@ services:
   # ────────────── TPC-H Data Generator (DBGEN) ────────────── #
   dbgen:
     build: ./docker/dbgen
-    container_name: tpch_dbgen_test
-    # This service now runs as root internally to create files,
-    # then changes ownership back to the host user.
+    container_name: tpch_dbgen
+    # This service runs as root to create files, then changes ownership.
     volumes:
-      # Use a bind mount to the local filesystem for easy access.
-      # Ensure the local directory ./docker/tpch-data exists.
       - ./docker/tpch-data:/data
     entrypoint: /bin/sh
-    # The command now does three things:
-    # 1. Copies dists.dss into the working directory.
-    # 2. Runs dbgen to generate the .tbl files (as root).
-    # 3. Changes the ownership of all generated files to match the host user's ID.
-    #    This is the key fix for the permission denied error.
     command: -c "cp /usr/local/bin/dists.dss /data && cd /data && /usr/local/bin/dbgen -s 1 -f -v && chown ${UID:-1000}:${GID:-1000} ./*"
-
 
   # ────────────── PostgreSQL ────────────── #
   postgres:
@@ -36,17 +27,11 @@ services:
       POSTGRES_PASSWORD: tpch
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      # IMPORTANT: Ensure this directory ONLY contains the 01_tpch_schema.sql file.
-      # Remove any old Northwind or other schema files to prevent conflicts.
       - ./docker/postgres/init:/docker-entrypoint-initdb.d
-      # Mount the generated data and test fixtures for loading
       - ./docker/tpch-data:/tpch-data:ro
       - ./tests/fixtures:/test-data:ro
     ports:
       - "5432:5432"
-    # Robust Healthcheck:
-    # Waits for the server to be ready AND for the 'region' table to exist,
-    # which proves the init script has run successfully.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tpch -d tpch && psql -U tpch -d tpch -c 'SELECT 1 FROM region LIMIT 1'"]
       interval: 5s
@@ -78,30 +63,33 @@ services:
   # ────────────── Neo4j ────────────── #
   neo4j:
     image: neo4j:5-community
-    container_name: neo4j_graph
-    # This user directive is the key fix for the Neo4j permission error.
-    # It aligns the container's user with the host user.
+    container_name: neo4j_graph_test
     user: "${UID:-1000}:${GID:-1000}"
     environment:
       NEO4J_AUTH: neo4j/password
-      NEO4JLABS_PLUGINS: '["apoc"]'
+      NEO4J_PLUGINS: '["apoc"]'
       NEO4J_apoc_import_file_enabled: "true"
       NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
-      # Allow LOAD CSV from both data directories
-      NEO4J_dbms_directories_import: "/tpch-data,/test-data"
+      NEO4J_server_directories_import: "/var/lib/neo4j/import"
+
+      # --- MEMORY CONFIGURATION FIX ---
+      # Corrected environment variable names based on official Neo4j 5.x documentation.
+      # Note the double underscores for settings that contain an underscore, e.g., initial_size -> initial__size.
+      NEO4J_server_memory_heap_initial__size: 6G
+      NEO4J_server_memory_heap_max__size: 6G
+      NEO4J_dbms_memory_transaction_total_max: 7G
+
     volumes:
-      - neo4j-data:/data
-      - ./docker/neo4j/init:/var/lib/neo4j/init
-      # Mount generated data and test fixtures for loading
-      - ./docker/tpch-data:/tpch-data:ro
-      - ./tests/fixtures:/test-data:ro
+      - ./docker/tpch-data:/var/lib/neo4j/import/tpch-data:ro
+      - ./tests/fixtures:/var/lib/neo4j/import/fixtures:ro
     ports:
       - "7687:7687"
       - "7474:7474"
     healthcheck:
-      test: ["CMD-SHELL", "cypher-shell -u neo4j -p password 'RETURN 1' || exit 1"]
+      test: [ "CMD-SHELL", "cypher-shell -u neo4j -p password 'RETURN 1' || exit 1" ]
       interval: 10s
-      retries: 15
+      timeout: 15s
+      retries: 20
     depends_on:
       dbgen:
         condition: service_completed_successfully
