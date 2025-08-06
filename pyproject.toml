@@ -8,7 +8,7 @@ readme      = "README.md"
 packages    = [{ include = "polyfuseql" }]
 
 [tool.poetry.dependencies]
-python            = "^3.12"
+python            = "^3.10"
 fastapi           = "0.116.1"
 uvicorn           = { version = ">=0.34.2,<0.35.0", extras = ["standard"] }
 sqlglot           = ">=26.17.1,<27.0.0"
@@ -23,6 +23,7 @@ requests = "2.32.4"
 urllib3 = "2.5.0"
 starlette = "0.47.2"
 rich = "^13.7.1"
+configargparse = "1.7.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest          = "^8.3.5"
