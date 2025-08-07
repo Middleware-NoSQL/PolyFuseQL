@@ -119,18 +119,14 @@ class PolyClient:
 
     async def count(self, logical: str, backend: str = "") -> int:
         if not backend:
-            backend, source = _MAPPING[logical]
-        source = logical
-        logging.info(backend, source)
-        match backend:
-            case "pg":
-                return await self.pg.count(source)
-            case "redis":
-                return await self.rd.count(source)
-            case "neo4j":
-                return await self.nj.count(source)
-            case _:
-                raise ValueError(f"Unknown backend: {backend}")
+            backend, source = self._catalogue.get(logical)
+        else:
+            source = logical
+        logging.info(f"Counting {source} on {backend}")
+        conn = self.backends.get(backend)
+        if not conn:
+            raise ValueError(f"Unknown backend: {backend}")
+        return await conn.count(source)
 
     async def get(
         self,
@@ -302,7 +298,8 @@ class PolyClient:
         self, table_name: str, file_path: str, engine: str
     ) -> int:
         """
-        Orchestrates bulk loading of a single TPC-H table to a specific backend.
+        Orchestrates bulk loading of a single TPC-H table
+        to a specific backend.
         """
         connector = self.backends.get(engine)
         if not connector:

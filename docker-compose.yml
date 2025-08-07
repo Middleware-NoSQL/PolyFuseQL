@@ -75,9 +75,9 @@ services:
       # --- MEMORY CONFIGURATION FIX ---
       # Corrected environment variable names based on official Neo4j 5.x documentation.
       # Note the double underscores for settings that contain an underscore, e.g., initial_size -> initial__size.
-      NEO4J_server_memory_heap_initial__size: 6G
-      NEO4J_server_memory_heap_max__size: 6G
-      NEO4J_dbms_memory_transaction_total_max: 7G
+      NEO4J_server_memory_heap_initial__size: 32G
+      NEO4J_server_memory_heap_max__size: 32G
+      NEO4J_dbms_memory_transaction_total_max: 34G
 
     volumes:
       - ./docker/tpch-data:/var/lib/neo4j/import/tpch-data:ro

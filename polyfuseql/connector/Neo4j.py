@@ -1,6 +1,5 @@
 # ruff: noqa: F401
 import logging
-import os
 from typing import Dict, Any, Optional, List
 from polyfuseql.connector.Connector import Connector
 from polyfuseql.utils.tpch_schema import TPCH_SCHEMA
@@ -225,9 +224,12 @@ class Neo4jConnector(Connector):
             result = await s.run(cypher_query)
             return [dict(record) async for record in result]
 
-    async def bulk_insert(self, table_name: str, file_path: str) -> int:
+    async def bulk_insert(
+        self, table_name: str, file_path: str, batch_size: int = 5000
+    ) -> int:
         """
-        Performs a high-performance bulk insert using Neo4j's LOAD CSV command.
+        Performs a high-performance bulk insert using batched
+        UNWIND operations.
         """
         driver = self._get_driver()
         schema = TPCH_SCHEMA.get(table_name.lower())
@@ -235,30 +237,61 @@ class Neo4jConnector(Connector):
         if not schema:
             raise ValueError(msg)
 
-        columns = schema["columns"]
+        cols = schema["columns"]
         label = table_name.capitalize()
-        file_name = os.path.basename(file_path)
-        # Construct the path relative to Neo4j's import directory
-        container_path = f"tpch-data/{file_name}"
 
-        # Clean the database before insertion for a consistent test environment
+        # Clean the database before insertion
         async with driver.session() as s:
             await s.run(f"MATCH (n:{label}) DETACH DELETE n")
 
-        # Construct the SET clause for the Cypher query
-        set_clauses = [f"{col}: row[{i}]" for i, col in enumerate(columns)]
-        set_clause_str = ", ".join(set_clauses)
-
-        # Construct the full LOAD CSV query
-        # The path is now relative to
-        # the container's configured import directory
-        cypher_query = f"""CALL {{
-        LOAD CSV FROM 'file:///{container_path}' AS row FIELDTERMINATOR '|'
-        CREATE (n:{label} {{ {set_clause_str} }})
-        }} IN TRANSACTIONS OF 1000 ROWS
+        # Prepare the Cypher query for batched creation
+        # We use `row.propertyName` to access properties from the UNWINDed map
+        props_str = ", ".join([f"{col}: row.{col}" for col in cols])
+        cypher_query = f"""UNWIND $rows AS row
+        CREATE (n:{label} {{ {props_str} }})
         """
 
-        async with driver.session() as s:
-            result = await s.run(cypher_query)
-            summary = await result.consume()
-            return summary.counters.nodes_created
+        total_inserted = 0
+        total_lines = 0
+        try:
+            with open(file_path, "r") as f:
+                batch = []
+                for line in f:
+                    total_lines += 1
+                    # TPC-H .tbl files use '|' as a field terminator
+                    values = line.strip().split("|")
+
+                    # Create a dictionary for each row,
+                    # mapping column names to values
+                    # Ensure that the number of values matches
+                    # the number of columns
+                    msg = "Skipping malformed row in "
+                    msg += f"{file_path}: {line.strip()}"
+                    if len(values) != len(cols):
+                        logging.warning(msg)
+                        continue
+
+                    row_dict = {cols[i]: values[i] for i in range(len(cols))}
+                    batch.append(row_dict)
+
+                    if len(batch) >= batch_size:
+                        async with driver.session() as s:
+                            result = await s.run(cypher_query, rows=batch)
+                            summary = await result.consume()
+                            total_inserted += summary.counters.nodes_created
+                        batch = []  # Reset batch after processing
+
+                # Process any remaining rows in the last batch
+                if batch:
+                    async with driver.session() as s:
+                        result = await s.run(cypher_query, rows=batch)
+                        summary = await result.consume()
+                        total_inserted += summary.counters.nodes_created
+        except FileNotFoundError:
+            logging.error(f"File not found: {file_path}")
+            raise
+        except Exception as e:
+            logging.error(f"Error during bulk insert for {table_name}: {e}")
+            raise
+
+        return total_inserted, total_lines

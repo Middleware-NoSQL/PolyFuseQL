@@ -17,6 +17,10 @@ sudo docker-compose logs -f redis-seed
 sudo docker-compose logs -f neo4j-seed
 sudo docker-compose logs -f dbgen
 
+docker-compose logs -f redis
+docker-compose logs -f neo4j
+docker-compose logs -f dbgen
+
 # Pruebas rápidas
 echo "Testing postgres"
 #PGPASSWORD="" psql  -h localhost -U northwind -d northwind -c "SELECT COUNT(*) FROM customers;"

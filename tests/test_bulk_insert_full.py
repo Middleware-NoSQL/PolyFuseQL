@@ -43,7 +43,8 @@ async def test_bulk_insert_full_neo4j():
     async with PolyClient.PolyClient() as client:
         for table_name in TPCH_TABLE_ORDER:
             file_path = DATA_DIR / f"{table_name}.tbl"
-            inserted_count = await client.bulk_load_table(
+            ins_count, t_l = await client.bulk_load_table(
                 table_name, str(file_path), "neo4j"
             )
-            assert inserted_count > 0
+            print(f"\nNeo4j:Inserted {ins_count}/{t_l} rows into {table_name}")
+            assert ins_count > 0
