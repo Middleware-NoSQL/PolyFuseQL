@@ -8,6 +8,10 @@ sudo systemctl start docker
 sudo docker-compose down -v          # borra volúmenes
 sudo docker-compose up -d            # crea y popula
 
+# Arrancar todo desde cero (carga automática)
+docker-compose down -v          # borra volúmenes
+docker-compose up -d            # crea y popula
+
 # Ver progreso de semillas
 sudo docker-compose logs -f redis-seed
 sudo docker-compose logs -f neo4j-seed

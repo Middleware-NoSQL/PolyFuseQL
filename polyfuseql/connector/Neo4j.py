@@ -252,8 +252,7 @@ class Neo4jConnector(Connector):
         # Construct the full LOAD CSV query
         # The path is now relative to
         # the container's configured import directory
-        msg = "CALL () {{ "
-        cypher_query = f"""{msg}
+        cypher_query = f"""CALL {{
         LOAD CSV FROM 'file:///{container_path}' AS row FIELDTERMINATOR '|'
         CREATE (n:{label} {{ {set_clause_str} }})
         }} IN TRANSACTIONS OF 1000 ROWS
