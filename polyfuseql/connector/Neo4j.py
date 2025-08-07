@@ -225,8 +225,8 @@ class Neo4jConnector(Connector):
             return [dict(record) async for record in result]
 
     async def bulk_insert(
-        self, table_name: str, file_path: str, batch_size: int = 5000
-    ) -> int:
+        self, table_name: str, f_path: str, batch_size: int = 5000
+    ) -> tuple[int, int]:
         """
         Performs a high-performance bulk insert using batched
         UNWIND operations.
@@ -247,26 +247,24 @@ class Neo4jConnector(Connector):
         # Prepare the Cypher query for batched creation
         # We use `row.propertyName` to access properties from the UNWINDed map
         props_str = ", ".join([f"{col}: row.{col}" for col in cols])
-        cypher_query = f"""UNWIND $rows AS row
-        CREATE (n:{label} {{ {props_str} }})
+        cypher_query = f"""
+        CALL {{
+            UNWIND $rows AS row
+            CREATE (n:{label} {{ {props_str} }})
+        }} IN TRANSACTIONS OF 1000 ROWS
         """
 
         total_inserted = 0
         total_lines = 0
         try:
-            with open(file_path, "r") as f:
+            with open(f_path, "r") as f:
                 batch = []
                 for line in f:
                     total_lines += 1
-                    # TPC-H .tbl files use '|' as a field terminator
-                    values = line.strip().split("|")
+                    # FIX: Remove the trailing delimiter before splitting
+                    values = line.strip().rstrip("|").split("|")
 
-                    # Create a dictionary for each row,
-                    # mapping column names to values
-                    # Ensure that the number of values matches
-                    # the number of columns
-                    msg = "Skipping malformed row in "
-                    msg += f"{file_path}: {line.strip()}"
+                    msg = f"Skipping malformed row in {f_path}: {line.strip()}"
                     if len(values) != len(cols):
                         logging.warning(msg)
                         continue
@@ -288,7 +286,7 @@ class Neo4jConnector(Connector):
                         summary = await result.consume()
                         total_inserted += summary.counters.nodes_created
         except FileNotFoundError:
-            logging.error(f"File not found: {file_path}")
+            logging.error(f"File not found: {f_path}")
             raise
         except Exception as e:
             logging.error(f"Error during bulk insert for {table_name}: {e}")
