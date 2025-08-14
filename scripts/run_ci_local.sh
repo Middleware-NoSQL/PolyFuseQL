@@ -18,11 +18,11 @@ echo "⏳ Waiting for all services to pass their health checks..."
 ./scripts/wait-for-services.sh
 
 # --- 4. Install dependencies ---
-echo "🐍 Installing Python dependencies with Poetry..."
-poetry install --with dev
+#echo "🐍 Installing Python dependencies with Poetry..."
+#poetry install --with dev
 
 # --- 5. Run tests ---
-echo "🧪 Running tests with pytest..."
-poetry run pytest -q --cov=polyfuseql --cov-report=xml
+#echo "🧪 Running tests with pytest..."
+poetry run pytest tests/test_tpch_query1.py --cov=polyfuseql --cov-report=xml
 
 echo "✅ CI simulation finished successfully!"

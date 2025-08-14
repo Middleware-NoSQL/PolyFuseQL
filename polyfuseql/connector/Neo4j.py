@@ -1,11 +1,14 @@
 # ruff: noqa: F401
 import logging
+from datetime import date
 from typing import Dict, Any, Optional, List
 from polyfuseql.connector.Connector import Connector
 from polyfuseql.utils.tpch_schema import TPCH_SCHEMA
-from neo4j import AsyncGraphDatabase as AGD, AsyncDriver
-from polyfuseql.utils.utils import env
+from neo4j import AsyncGraphDatabase as AGD, AsyncDriver, time as neo_time
+from polyfuseql.utils.utils import env, _camelize_keys, get_pydantic_model
 from sqlglot import exp
+import csv
+from pydantic import ValidationError
 
 
 class Neo4jConnector(Connector):
@@ -69,9 +72,6 @@ class Neo4jConnector(Connector):
                 + cypher_where
                 + "= $pk_val RETURN properties(n) AS p LIMIT 1"
             )
-            logging.info("Neo4j-con-get-cypher", cypher)
-            logging.info("Neo4j-con-get-pk_val", pk_val)
-            logging.info("Neo4j-con-get-pk_val-type", type(pk_val))
             result = await s.run(cypher, pk_val=pk_val)
             rec = await result.single()
             return rec["p"] if rec and rec["p"] else {}
@@ -109,8 +109,6 @@ class Neo4jConnector(Connector):
     ) -> int:
         driver = self._get_driver()
         async with driver.session() as s:
-            # The "+=" operator efficiently merges properties
-            # from the payload map
             cypher = f"MATCH (n:{label} {{`{pk_col}`: $pk_val}}) "
             cypher += "SET n += $payload"
             summary = await s.run(cypher, pk_val=pk_val, payload=payload)
@@ -120,24 +118,19 @@ class Neo4jConnector(Connector):
         """Manually translates a SQL JOIN AST to a Cypher query."""
         driver = self._get_driver()
 
-        # 1. Deconstruct the AST
         left_table_expr = ast.args.get("from").this
         join_expr = ast.args.get("joins")[0]
         right_table_expr = join_expr.this
-        on_condition = join_expr.args.get("on")
+        on_cond = join_expr.args.get("on")
 
-        left_table_name = left_table_expr.this.name.capitalize()
-        left_alias = left_table_expr.alias_or_name
-        right_table_name = right_table_expr.this.name.capitalize()
-        right_alias = right_table_expr.alias_or_name
+        l_t_name = left_table_expr.this.name.capitalize()
+        l_alias = left_table_expr.alias_or_name
+        r_t_name = right_table_expr.this.name.capitalize()
+        r_alias = right_table_expr.alias_or_name
 
-        # 2. Build the MATCH clause
-        match_clause = f"MATCH ({left_alias}:{left_table_name}), "
-        match_clause += f"({right_alias}:{right_table_name})"
-        # 3. Build the WHERE clause
-        on_left = f"{on_condition.this.table}.{on_condition.this.this.name}"
-        on_right = f"{on_condition.expression.table}"
-        on_right += f".{on_condition.expression.this.name}"
+        match_clause = f"MATCH ({l_alias}:{l_t_name}), ({r_alias}:{r_t_name})"
+        on_left = f"{on_cond.this.table}.{on_cond.this.this.name}"
+        on_right = f"{on_cond.expression.table}.{on_cond.expression.this.name}"
         where_clauses = [f"{on_left} = {on_right}"]
 
         params = {}
@@ -157,75 +150,98 @@ class Neo4jConnector(Connector):
 
         where_clause_str = " WHERE " + " AND ".join(where_clauses)
 
-        # 5. Build the RETURN clause
         return_expressions = []
         for col_expr in ast.expressions:
             col_name = col_expr.this.name
-            table_alias = col_expr.table
-            return_alias = f"`{col_name}`"
-            return_expressions.append(
-                f"{table_alias}.{col_name} AS {return_alias}"
-            )  # noqa: F501
+            t_alias = col_expr.table
+            ret_alias = f"`{col_name}`"
+            return_expressions.append(f"{t_alias}.{col_name} AS {ret_alias}")
 
         return_clause_str = "RETURN " + ", ".join(return_expressions)
-
-        # 6. Assemble the final Cypher Query
         cypher_query = f"{match_clause}{where_clause_str} {return_clause_str}"
-        logging.info(f"Manually constructed Cypher query: {cypher_query}")
-        logging.info("Neo4j-join-cypher-query", cypher_query)
-        # 7. Execute and return results
+
         async with driver.session() as s:
             result = await s.run(cypher_query, **params)
-            # FIX: Use an async list comprehension
-            # to correctly iterate the AsyncResult
             return [dict(record) async for record in result]
 
     async def group_by(self, ast: exp.Select) -> List[Dict[str, Any]]:
-        """Manually translates a SQL GROUP BY to a Cypher aggregation query."""
+        """Translates a SQL GROUP BY query to a Cypher aggregation query."""
         driver = self._get_driver()
 
-        # 1. Deconstruct the AST
         table_name = ast.find(exp.Table).name.capitalize()
-        match_clause = f"MATCH (n:{table_name})"
+        node_alias = "n"
+        match_clause = f"MATCH ({node_alias}:{table_name})"
 
-        # 2. Build the RETURN clause from the
-        # GROUP BY and aggregation expressions
-        return_expressions = []
+        where_clause = ""
+        params = {}
+        if ast.args.get("where"):
+            where_expr = ast.args["where"].this
+            if isinstance(where_expr, exp.LTE):
+                col = where_expr.left.sql()
+                date_val = where_expr.right.sql()
+                date_str = date_val.split("'")[1]
+                where_clause = f"WHERE {node_alias}.{col} <= $date_threshold"
+                params["date_threshold"] = neo_time.Date.from_iso_format(
+                    date_str
+                )  # noqa: F501
+
+        return_items = []
         for expr in ast.expressions:
-            logging.info("============================")
-            logging.info("neo4j-group-by-expr", expr)
-            logging.info("neo4j-group-by-expr-instance", type(expr))
-            logging.info("============================")
-            if isinstance(expr, exp.Alias) and str(expr).lower().startswith(
-                "count"
-            ):  # noqa: F501
-                # It's an aggregation function,
-                # e.g., COUNT(*) AS customer_count
-                alias = expr.alias_or_name
-                return_expressions.append(f"count(n) AS {alias}")
-            elif isinstance(expr, exp.Column):
-                # It's a grouping key, e.g., "country"
-                col_name = expr.this.name
-                return_expressions.append(f"n.{col_name} AS {col_name}")
+            alias = expr.alias_or_name
+            if isinstance(expr, exp.Column):
+                return_items.append(f"{node_alias}.{expr.sql()} AS `{alias}`")
+            elif isinstance(expr, exp.Alias):
+                agg_fun = expr.this
+                if isinstance(agg_fun, exp.Count):
+                    return_items.append(f"count(*) AS `{alias}`")
+                elif isinstance(agg_fun, exp.AggFunc) and agg_fun.expressions:
+                    func_name = agg_fun.name.lower()
+                    inner = self._translate_agg_expression(
+                        agg_fun.expressions[0], node_alias
+                    )
+                    return_items.append(f"{func_name}({inner}) AS `{alias}`")
 
-        if not return_expressions:
-            raise ValueError(
-                "GROUP BY query must have columns or aggregations in SELECT."
-            )
+        return_clause = "RETURN " + ", ".join(return_items)
+        order_by_clause = ""
+        if ast.args.get("order"):
+            order_keys = [
+                f"`{e.sql()}`" for e in ast.args.get("order").expressions
+            ]  # noqa: F501
+            order_by_clause = "ORDER BY " + ", ".join(order_keys)
 
-        return_clause = "RETURN " + ", ".join(return_expressions)
-
-        # 3. Assemble and run the query
-        cypher_query = f"{match_clause} {return_clause}"
-        msg = f"neo4j-Manually constructed GROUP BY query: {cypher_query}"
-        logging.info(msg)
+        cypher_query = (
+            f"{match_clause} {where_clause} {return_clause} {order_by_clause}"
+        )
 
         async with driver.session() as s:
-            result = await s.run(cypher_query)
-            return [dict(record) async for record in result]
+            result = await s.run(cypher_query, **params)
+            raw_results = [dict(record) async for record in result]
+            return [_camelize_keys(row) for row in raw_results]
+
+    def _translate_agg_expression(self, expr, node_alias):
+        """Recursively translates a sqlglot expression into a Cypher string."""
+        if isinstance(expr, exp.Column):
+            return f"toFloat({node_alias}.{expr.sql()})"
+        if isinstance(expr, exp.Literal):
+            return expr.sql()
+        if isinstance(expr, exp.Mul):
+            left = self._translate_agg_expression(expr.left, node_alias)
+            right = self._translate_agg_expression(expr.right, node_alias)
+            return f"({left} * {right})"
+        if isinstance(expr, exp.Sub):
+            left = self._translate_agg_expression(expr.left, node_alias)
+            right = self._translate_agg_expression(expr.right, node_alias)
+            return f"({left} - {right})"
+        if isinstance(expr, exp.Add):
+            left = self._translate_agg_expression(expr.left, node_alias)
+            right = self._translate_agg_expression(expr.right, node_alias)
+            return f"({left} + {right})"
+        raise NotImplementedError(
+            f"Unsupported expression type in aggregation: {type(expr)}"
+        )
 
     async def bulk_insert(
-        self, table_name: str, f_path: str, batch_size: int = 5000
+        self, table_name: str, file_path: str, batch_size: int = 5000
     ) -> tuple[int, int]:
         """
         Performs a high-performance bulk insert using batched
@@ -233,19 +249,18 @@ class Neo4jConnector(Connector):
         """
         driver = self._get_driver()
         schema = TPCH_SCHEMA.get(table_name.lower())
-        msg = f"No schema definition found for table: {table_name}"
+        m = f"No schema definition found for table: {table_name}"
         if not schema:
-            raise ValueError(msg)
+            raise ValueError(m)
 
         cols = schema["columns"]
         label = table_name.capitalize()
 
-        # Clean the database before insertion
+        DynamicModel = get_pydantic_model(table_name, schema)
+
         async with driver.session() as s:
             await s.run(f"MATCH (n:{label}) DETACH DELETE n")
 
-        # Prepare the Cypher query for batched creation
-        # We use `row.propertyName` to access properties from the UNWINDed map
         props_str = ", ".join([f"{col}: row.{col}" for col in cols])
         cypher_query = f"""
         CALL {{
@@ -257,36 +272,51 @@ class Neo4jConnector(Connector):
         total_inserted = 0
         total_lines = 0
         try:
-            with open(f_path, "r") as f:
+            with open(file_path, "r", encoding="utf-8") as f:
+                reader = csv.reader(f, delimiter="|")
                 batch = []
-                for line in f:
+                for line in reader:
+                    if not line:
+                        continue
+                    line = line[: len(cols)]
+                    if len(line) < len(cols):
+                        logging.warning(
+                            f"Skipping malformed row in {file_path}: {line}"
+                        )
+                        continue
                     total_lines += 1
-                    # FIX: Remove the trailing delimiter before splitting
-                    values = line.strip().rstrip("|").split("|")
 
-                    msg = f"Skipping malformed row in {f_path}: {line.strip()}"
-                    if len(values) != len(cols):
+                    try:
+                        row_dict = dict(zip(cols, line))
+                        validated_data = DynamicModel(**row_dict)
+
+                        model_dict = validated_data.model_dump()
+                        for key, value in model_dict.items():
+                            if isinstance(value, date):
+                                model_dict[key] = neo_time.Date(
+                                    value.year, value.month, value.day
+                                )
+                        batch.append(model_dict)
+                    except ValidationError as e:
+                        msg = f"Skipping row due to validation error: {line}."
+                        msg += f" Error: {e}"
                         logging.warning(msg)
                         continue
-
-                    row_dict = {cols[i]: values[i] for i in range(len(cols))}
-                    batch.append(row_dict)
 
                     if len(batch) >= batch_size:
                         async with driver.session() as s:
                             result = await s.run(cypher_query, rows=batch)
                             summary = await result.consume()
                             total_inserted += summary.counters.nodes_created
-                        batch = []  # Reset batch after processing
+                        batch = []
 
-                # Process any remaining rows in the last batch
                 if batch:
                     async with driver.session() as s:
                         result = await s.run(cypher_query, rows=batch)
                         summary = await result.consume()
                         total_inserted += summary.counters.nodes_created
         except FileNotFoundError:
-            logging.error(f"File not found: {f_path}")
+            logging.error(f"File not found: {file_path}")
             raise
         except Exception as e:
             logging.error(f"Error during bulk insert for {table_name}: {e}")

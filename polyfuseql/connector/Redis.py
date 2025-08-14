@@ -2,12 +2,14 @@ import json
 import logging
 from typing import Dict, Any, Optional, List
 from polyfuseql.connector.Connector import Connector
-from polyfuseql.utils.utils import env
+from polyfuseql.utils.utils import env, _camelize_keys, get_pydantic_model
 from polyfuseql.utils.tpch_schema import TPCH_SCHEMA
 import redis.asyncio as aioredis
 from sqlglot import exp
 import itertools
 import csv
+from datetime import datetime, date
+from pydantic import ValidationError
 
 
 class RedisConnector(Connector):
@@ -15,30 +17,19 @@ class RedisConnector(Connector):
 
     async def get_all(self, entity: str) -> List[Dict[str, Any]]:
         r = self._get_client()
-        keys = await r.keys(f"{entity}:*")
+        keys = await r.keys(f"{entity.capitalize()}:*")
         if not keys:
             return []
-        logging.info("REDIS-get_all-keys", keys)
-        data_type = self._options.get("data_type", "string")
-        msg = f"Unsupported data type:{data_type}"
-        all_list = []
+
+        pipe = r.pipeline()
         for key in keys:
-            match data_type:
-                case "string":
-                    raw = await r.get(key)
-                    all_list.append(json.loads(raw) if raw else {})
-                case "hash":
-                    raw_hash = await r.hgetall(key)
-                    all_list.append(raw_hash if raw_hash else {})
-                case "json":
-                    raw_json = await r.json().get(key)
-                    all_list.append(raw_json if raw_json else {})
-                case _:
-                    raise NotImplementedError(msg)
-        return all_list
+            await pipe.hgetall(key)
+
+        results = await pipe.execute()
+        return [dict(res) for res in results if res]
 
     def __init__(self, options: Optional[Dict] = None) -> None:
-        super().__init__(options)
+        super().__init__(options or {})
         self._host = env("REDIS_HOST", "localhost")
         self._port = int(env("REDIS_PORT", "6379"))
         self._password = env("REDIS_PASSWORD", "tpch")
@@ -84,24 +75,44 @@ class RedisConnector(Connector):
         return total
 
     async def get(
-        self, namespace: str, pk_col: str, pk_val: Any
-    ) -> Dict[str, Any]:  # noqa: F501
+        self,
+        namespace: str,
+        pk_col: str,
+        pk_val: Any,
+        interpret_types: bool = True,  # noqa: F501
+    ) -> Dict[str, Any]:
         r = self._get_client()
-        key = f"{namespace}:{pk_val}"
-        data_type = self._options.get("data_type", "string")
+        key = f"{namespace.capitalize()}:{pk_val}"
+        data_type = self._options.get("data_type", "hash")
 
+        raw_data: Optional[Dict | str] = None
         match data_type:
             case "string":
-                raw = await r.get(key)
-                return json.loads(raw) if raw else {}
+                raw_str = await r.get(key)
+                raw_data = json.loads(raw_str) if raw_str else None
             case "hash":
-                raw_hash = await r.hgetall(key)
-                return raw_hash
+                raw_data = await r.hgetall(key)
             case "json":
-                raw_json = await r.json().get(key)
-                return raw_json if raw_json else {}
+                raw_data = await r.json().get(key)
             case _:
                 raise NotImplementedError(f"Unsupported data type:{data_type}")
+
+        if not raw_data or not interpret_types:
+            return raw_data or {}
+
+        schema = TPCH_SCHEMA.get(namespace.lower())
+        if not schema:
+            return raw_data
+
+        dynamic_model = get_pydantic_model(namespace, schema)
+        try:
+            validated_model = dynamic_model(**raw_data)
+            return validated_model.model_dump()
+        except ValidationError as e:
+            msg = f"Could not validate/cast data for key {key}. "
+            msg += f"Returning raw. Error: {e}"
+            logging.warning(msg)
+            return raw_data
 
     async def insert(self, namespace: str, payload: Dict[str, Any]) -> Any:
         r = self._get_client()
@@ -159,23 +170,17 @@ class RedisConnector(Connector):
 
         match data_type:
             case "string":
-                # Inefficient Read-Modify-Write for string-encoded JSON
                 raw = await r.get(key)
-                logging.info("redis-string-raw", raw)
                 if not raw:
                     return 0
                 data = json.loads(raw)
-                logging.info("redis-string-json", data)
                 data.update(payload)
-                logging.info("redis-string-json-updated", data)
                 await r.set(key, json.dumps(data))
                 return 1
             case "hash":
-                # Efficient partial update for HASH
                 await r.hset(key, mapping=payload)
                 return 1
             case "json":
-                # Efficient partial update for JSON
                 for field, value in payload.items():
                     await r.json().set(key, f"$.{field}", value)
                 return 1
@@ -184,9 +189,10 @@ class RedisConnector(Connector):
                     f"Unsupported data type for update: {data_type}"
                 )
 
-    async def join(self, ast: exp.Select) -> List[Dict[str, Any]]:
+    async def join(
+        self, ast: exp.Select, interpret_numeric: bool = True
+    ) -> List[Dict[str, Any]]:
         """Performs an application-side INNER JOIN on two Redis namespaces."""
-        # 1. Deconstruct the AST using the same robust logic as Neo4j
         left_table_expr = ast.args.get("from").this
         join_expr = ast.args.get("joins")[0]
         right_table_expr = join_expr.this
@@ -194,134 +200,159 @@ class RedisConnector(Connector):
 
         left_table = left_table_expr.this.name
         right_table = right_table_expr.this.name
-        logging.info("redis-join-left_table", left_table)
-        logging.info("redis-join-right_table", right_table)
         left_join_col = on_condition.this.this.name
         right_join_col = on_condition.expression.this.name
-        logging.info("redis-join-left_join_col", left_join_col)
-        logging.info("redis-join+right_join_col", right_join_col)
 
-        # 2. Fetch all data from both namespaces
         left_rows = await self.get_all(left_table)
         right_rows = await self.get_all(right_table)
 
-        logging.info("redis-join-left_rows", left_rows)
-        logging.info("redis-join-right_rows", right_rows)
-
-        # 3. Create a lookup map for the right side of the join for efficiency
         right_map = {str(row.get(right_join_col)): row for row in right_rows}
-        where_clauses = []
-        params = {}
-        if ast.args.get("where"):
-            where_expr = ast.args["where"].this
-            where_col = f"{where_expr.this.table}.{where_expr.this.this.name}"
-            where_clauses.append(f"{where_col} = $where_val")
 
-            lit_expr = where_expr.expression
-            if lit_expr.is_string:
-                params["where_val"] = lit_expr.this
-            else:
-                try:
-                    params["where_val"] = int(lit_expr.this)
-                except ValueError:
-                    params["where_val"] = float(lit_expr.this)
-
-        # 4. Iterate and join
         joined_results = []
         for left_row in left_rows:
             join_key = str(left_row.get(left_join_col))
-            if join_key in right_map and join_key in params.values():
-                right_row = right_map[join_key]
-                # Merge the two dictionaries to form the joined row
-                joined_results.append({**left_row, **right_row})
+            if join_key in right_map:
+                joined_results.append({**left_row, **right_map[join_key]})
 
         return joined_results
 
-    async def group_by(self, ast: exp.Select) -> List[Dict[str, Any]]:
+    async def group_by(
+        self, ast: exp.Select, interpret_numeric: bool = True
+    ) -> List[Dict[str, Any]]:
         """Performs an application-side GROUP BY on a Redis namespace."""
-
-        # 1. Deconstruct the AST
         table_name = ast.find(exp.Table).name
-        group_by_col = ast.args.get("group").expressions[0].this.name
+        group_by_cols = [e.sql() for e in ast.args.get("group").expressions]
 
-        # Determine the aggregation function
-        agg_expr = ast.expressions[1]  # e.g., COUNT(*)
-        if not (
-            isinstance(agg_expr, exp.Alias)
-            and str(agg_expr).lower().startswith("count")
-        ):
-            raise NotImplementedError(
-                "Only COUNT(*) is supported for Redis GROUP BY."
-            )  # noqa: F501
-        agg_alias = agg_expr.alias_or_name
-
-        # 2. Fetch all data from the Redis namespace
         all_data = await self.get_all(table_name)
         if not all_data:
             return []
 
-        # 3. Perform the group by in Python
-        # Sort data to prepare for itertools.groupby
-        all_data.sort(key=lambda x: x.get(group_by_col))
+        if ast.args.get("where"):
+            where_expr = ast.args["where"].this
+            if isinstance(where_expr, exp.LTE):
+                col, date_val = where_expr.left.sql(), where_expr.right.sql()
+                date_str = date_val.split("'")[1]
+                threshold_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                all_data = [
+                    row
+                    for row in all_data
+                    if datetime.strptime(row[col], "%Y-%m-%d").date()
+                    <= threshold_date  # noqa: F501
+                ]
+
+        all_data.sort(key=lambda x: tuple(x.get(col) for col in group_by_cols))
+
+        def _evaluate_expression(expression, row_data):
+            if isinstance(expression, exp.Column):
+                val = row_data.get(expression.sql())
+                return float(val) if interpret_numeric else val
+            if isinstance(expression, exp.Literal):
+                return float(expression.this)
+            if isinstance(expression, exp.Mul):
+                return _evaluate_expression(
+                    expression.left, row_data
+                ) * _evaluate_expression(expression.right, row_data)
+            if isinstance(expression, exp.Sub):
+                return _evaluate_expression(
+                    expression.left, row_data
+                ) - _evaluate_expression(expression.right, row_data)
+            if isinstance(expression, exp.Add):
+                return _evaluate_expression(
+                    expression.left, row_data
+                ) + _evaluate_expression(expression.right, row_data)
+            msg = f"Unsupported expression: {type(expression)}"
+            raise NotImplementedError(msg)
 
         results = []
-        # Group records by the specified column
-        for key, group in itertools.groupby(
-            all_data, key=lambda x: x.get(group_by_col)
+        for key, group_iter in itertools.groupby(
+            all_data, key=lambda x: tuple(x.get(col) for col in group_by_cols)
         ):
-            # Count the items in each group
-            count = len(list(group))
-            results.append({group_by_col: key, agg_alias: count})
+            group = list(group_iter)
+            result_row = dict(zip(group_by_cols, key))
 
-        return results
+            for expr in ast.expressions:
+                if isinstance(expr, exp.Alias):
+                    agg_func = expr.this
+                    alias = expr.alias_or_name
+
+                    if isinstance(agg_func, exp.Count):
+                        result_row[alias] = len(group)
+                    elif (
+                        isinstance(agg_func, exp.AggFunc)
+                        and agg_func.expressions  # noqa: F501
+                    ):  # noqa: F501
+                        func_name = agg_func.name.lower()
+                        inner = agg_func.expressions[0]
+                        values = [
+                            _evaluate_expression(inner, row) for row in group
+                        ]  # noqa: F501
+                        if func_name == "sum":
+                            result_row[alias] = sum(values)
+                        elif func_name == "avg":
+                            result_row[alias] = (
+                                sum(values) / len(values) if values else 0
+                            )
+            results.append(result_row)
+        return [_camelize_keys(row) for row in results]
 
     async def bulk_insert(self, table_name: str, file_path: str) -> int:
         r = self._get_client()
-        await r.flushdb()
+        if table_name.lower() == "lineitem":
+            await r.flushdb()
+
         schema = TPCH_SCHEMA.get(table_name.lower())
-        msg = f"No schema definition found for table: {table_name}"
         if not schema:
+            msg = f"No schema definition found for table: {table_name}"
             raise ValueError(msg)
 
         columns = schema["columns"]
         pk_info = schema["pk"]
+        data_type = self._options.get("data_type", "hash")
+
+        dynamic_model = get_pydantic_model(table_name, schema)
 
         inserted_count = 0
-        batch_size = 10000
-
         with open(file_path, "r") as f:
             reader = csv.reader(f, delimiter="|")
-            for i, row in enumerate(reader):
+            batch = []
+            for row in reader:
                 if not row or len(row) <= 1:
                     continue
-                inserted_count += 1
+                row = row[: len(columns)]
+                if len(row) < len(columns):
+                    continue
+
+                try:
+                    row_dict = dict(zip(columns, row))
+                    validated_data = dynamic_model(**row_dict)
+                    batch.append(validated_data.model_dump())
+                    inserted_count += 1
+                except ValidationError as e:
+                    msg = "Skipping malformed row due to validation"
+                    msg += f" error: {row}. Error: {e}"
+                    logging.warning(msg)
 
         async with r.pipeline(transaction=False) as pipe:
-            with open(file_path, "r") as f:
-                reader = csv.reader(f, delimiter="|")
-                for i, row in enumerate(reader):
-                    if not row or len(row) <= 1:
-                        continue
+            for payload in batch:
+                if isinstance(pk_info, list):
+                    pk_val = ":".join([str(payload[k]) for k in pk_info])
+                else:
+                    pk_val = payload[pk_info]
 
-                    # Create a dictionary payload from the row
-                    payload = {col: val for col, val in zip(columns, row[:-1])}
+                key = f"{table_name.capitalize()}:{pk_val}"
 
-                    # Determine the primary key value
-                    if isinstance(pk_info, list):  # Composite key
-                        pk_val = ":".join([payload[k] for k in pk_info])
-                    else:
-                        pk_val = payload[pk_info]
-
-                    key = f"{table_name.capitalize()}:{pk_val}"
-
-                    # Using HSET for structured data storage
-                    pipe.hset(key, mapping=payload)
-
-                    if (i + 1) % batch_size == 0:
-                        await pipe.execute()
-
-            # Execute any remaining commands
-            if (i + 1) % batch_size != 0:
-                await pipe.execute()
+                if data_type == "hash":
+                    await pipe.hset(
+                        key, mapping={k: str(v) for k, v in payload.items()}
+                    )
+                elif data_type == "string":
+                    await pipe.set(key, json.dumps(payload, default=str))
+                elif data_type == "json":
+                    serializable_payload = {
+                        k: (v.isoformat() if isinstance(v, date) else v)
+                        for k, v in payload.items()
+                    }
+                    pipe.json().set(key, "$", serializable_payload)
+            await pipe.execute()
 
         return inserted_count
