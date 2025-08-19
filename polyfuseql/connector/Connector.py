@@ -73,6 +73,11 @@ class Connector(ABC):
         pass
 
     @abstractmethod
+    async def aggregate(self, ast: exp.Select) -> List[Dict[str, Any]]:
+        """Executes a simple aggregation query (no GROUP BY)."""
+        pass
+
+    @abstractmethod
     async def bulk_insert(self, table_name: str, file_path: str) -> int:
         """
         Bulk inserts data from a file into the specified table.

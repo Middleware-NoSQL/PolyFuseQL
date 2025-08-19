@@ -1,8 +1,4 @@
-# polyfuseql/utils/tpch_schema.py (New File)
 # Central repository for TPC-H table schemas.
-# This provides a single source of truth for column names and primary keys,
-# which is essential for schema-aware operations like bulk loading.
-
 TPCH_SCHEMA = {
     "region": {
         "columns": ["r_regionkey", "r_name", "r_comment"],
@@ -46,7 +42,6 @@ TPCH_SCHEMA = {
             "ps_supplycost",
             "ps_comment",
         ],
-        # Composite primary key
         "pk": ["ps_partkey", "ps_suppkey"],
     },
     "customer": {
@@ -95,8 +90,11 @@ TPCH_SCHEMA = {
             "l_shipmode",
             "l_comment",
         ],
-        # Composite primary key
         "pk": ["l_orderkey", "l_linenumber"],
+    },
+    "sales": {
+        "columns": ["sale_id", "amount", "sale_date"],
+        "pk": "sale_id",
     },
 }
 

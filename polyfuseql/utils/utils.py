@@ -56,7 +56,7 @@ def _camelize_keys(obj: Dict[str, Any]) -> Dict[str, Any]:
     return {camel(k): v for k, v in obj.items()}
 
 
-def get_pydantic_model(t_name: str, schema: Dict) -> Type[BaseModel]:
+def get_pydantic_model(tb_name: str, schema: Dict) -> Type[BaseModel]:
     """
     Dynamically creates a Pydantic model from a schema definition
     with a smart field validator to coerce types.
@@ -104,8 +104,8 @@ def get_pydantic_model(t_name: str, schema: Dict) -> Type[BaseModel]:
             return v
 
     # Create the final model inheriting from our base model
-    dynamic_model = create_model(
-        f"{t_name.capitalize()}Model", __base__=TblRowModel, **pydantic_fields
+    DynamicModel = create_model(
+        f"{tb_name.capitalize()}Model", __base__=TblRowModel, **pydantic_fields
     )
 
-    return dynamic_model
+    return DynamicModel

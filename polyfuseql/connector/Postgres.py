@@ -80,8 +80,6 @@ class PostgresConnector(Connector):
             records = await conn.fetch(sql, *params)
         else:
             records = await conn.fetch(sql)
-        # records = await conn.fetch(sql, *params)
-        # if params else await conn.fetch(sql)
         return [_camelize_keys(dict(r)) for r in records]
 
     async def insert(self, table: str, payload: Dict[str, Any]) -> Any:
@@ -123,7 +121,10 @@ class PostgresConnector(Connector):
     async def group_by(self, ast: exp.Select) -> List[Dict[str, Any]]:
         return await self.query(ast.sql())
 
-    # New implementation for the bulk_insert function to pass the test
+    async def aggregate(self, ast: exp.Select) -> List[Dict[str, Any]]:
+        """Executes a simple aggregation query (no GROUP BY)."""
+        return await self.query(ast.sql())
+
     async def bulk_insert(self, t_name: str, file_path: str) -> int:
         """
         Performs a high-performance bulk insert using PostgreSQL's COPY command

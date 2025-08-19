@@ -10,6 +10,7 @@ import itertools
 import csv
 from datetime import datetime, date
 from pydantic import ValidationError
+from decimal import Decimal, InvalidOperation
 
 
 class RedisConnector(Connector):
@@ -23,7 +24,7 @@ class RedisConnector(Connector):
 
         pipe = r.pipeline()
         for key in keys:
-            await pipe.hgetall(key)
+            pipe.hgetall(key)
 
         results = await pipe.execute()
         return [dict(res) for res in results if res]
@@ -75,11 +76,7 @@ class RedisConnector(Connector):
         return total
 
     async def get(
-        self,
-        namespace: str,
-        pk_col: str,
-        pk_val: Any,
-        interpret_types: bool = True,  # noqa: F501
+        self, namespace: str, pk_col: str, pk_val: Any, interpret: bool = True
     ) -> Dict[str, Any]:
         r = self._get_client()
         key = f"{namespace.capitalize()}:{pk_val}"
@@ -97,16 +94,16 @@ class RedisConnector(Connector):
             case _:
                 raise NotImplementedError(f"Unsupported data type:{data_type}")
 
-        if not raw_data or not interpret_types:
+        if not raw_data or not interpret:
             return raw_data or {}
 
         schema = TPCH_SCHEMA.get(namespace.lower())
         if not schema:
             return raw_data
 
-        dynamic_model = get_pydantic_model(namespace, schema)
+        DynamicModel = get_pydantic_model(namespace, schema)
         try:
-            validated_model = dynamic_model(**raw_data)
+            validated_model = DynamicModel(**raw_data)
             return validated_model.model_dump()
         except ValidationError as e:
             msg = f"Could not validate/cast data for key {key}. "
@@ -216,6 +213,41 @@ class RedisConnector(Connector):
 
         return joined_results
 
+    def _eval_expression(self, expr, row_data, interpret_numeric=True):
+        """Helper method to recursively evaluate a
+        sqlglot expression against a data row."""
+        if isinstance(expr, exp.Column):
+            val = row_data.get(expr.sql())
+            if interpret_numeric:
+                try:
+                    return Decimal(val) if val is not None else Decimal("0.0")
+                except (InvalidOperation, TypeError):
+                    return Decimal("0.0")
+            return val
+        if isinstance(expr, exp.Literal):
+            return Decimal(expr.this)
+        if isinstance(expr, exp.Mul):
+            return self._eval_expression(
+                expr.left, row_data
+            ) * self._eval_expression(  # noqa: E501
+                expr.right, row_data
+            )
+        if isinstance(expr, exp.Sub):
+            return self._eval_expression(
+                expr.left, row_data
+            ) - self._eval_expression(  # noqa: E501
+                expr.right, row_data
+            )
+        if isinstance(expr, exp.Add):
+            return self._eval_expression(
+                expr.left, row_data
+            ) + self._eval_expression(  # noqa: E501
+                expr.right, row_data
+            )
+        if isinstance(expr, exp.Paren):
+            return self._eval_expression(expr.this, row_data)
+        raise NotImplementedError(f"Unsupported expression: {type(expr)}")
+
     async def group_by(
         self, ast: exp.Select, interpret_numeric: bool = True
     ) -> List[Dict[str, Any]]:
@@ -232,36 +264,14 @@ class RedisConnector(Connector):
             if isinstance(where_expr, exp.LTE):
                 col, date_val = where_expr.left.sql(), where_expr.right.sql()
                 date_str = date_val.split("'")[1]
-                threshold_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                th_d = datetime.strptime(date_str, "%Y-%m-%d").date()
                 all_data = [
                     row
                     for row in all_data
-                    if datetime.strptime(row[col], "%Y-%m-%d").date()
-                    <= threshold_date  # noqa: F501
+                    if datetime.strptime(row[col], "%Y-%m-%d").date() <= th_d
                 ]
 
         all_data.sort(key=lambda x: tuple(x.get(col) for col in group_by_cols))
-
-        def _evaluate_expression(expression, row_data):
-            if isinstance(expression, exp.Column):
-                val = row_data.get(expression.sql())
-                return float(val) if interpret_numeric else val
-            if isinstance(expression, exp.Literal):
-                return float(expression.this)
-            if isinstance(expression, exp.Mul):
-                return _evaluate_expression(
-                    expression.left, row_data
-                ) * _evaluate_expression(expression.right, row_data)
-            if isinstance(expression, exp.Sub):
-                return _evaluate_expression(
-                    expression.left, row_data
-                ) - _evaluate_expression(expression.right, row_data)
-            if isinstance(expression, exp.Add):
-                return _evaluate_expression(
-                    expression.left, row_data
-                ) + _evaluate_expression(expression.right, row_data)
-            msg = f"Unsupported expression: {type(expression)}"
-            raise NotImplementedError(msg)
 
         results = []
         for key, group_iter in itertools.groupby(
@@ -277,60 +287,132 @@ class RedisConnector(Connector):
 
                     if isinstance(agg_func, exp.Count):
                         result_row[alias] = len(group)
-                    elif (
-                        isinstance(agg_func, exp.AggFunc)
-                        and agg_func.expressions  # noqa: F501
-                    ):  # noqa: F501
-                        func_name = agg_func.name.lower()
-                        inner = agg_func.expressions[0]
-                        values = [
-                            _evaluate_expression(inner, row) for row in group
-                        ]  # noqa: F501
-                        if func_name == "sum":
-                            result_row[alias] = sum(values)
-                        elif func_name == "avg":
+                    elif isinstance(agg_func, exp.AggFunc) and agg_func.this:
+                        in_exp = agg_func.this
+                        vals = []
+                        for row in group:
+                            vals.append(self._eval_expression(in_exp, row))
+                        if isinstance(agg_func, exp.Sum):
+                            result_row[alias] = sum(vals)
+                        elif isinstance(agg_func, exp.Avg):
                             result_row[alias] = (
-                                sum(values) / len(values) if values else 0
+                                sum(vals) / Decimal(len(vals))
+                                if vals
+                                else Decimal("0.0")
                             )
             results.append(result_row)
         return [_camelize_keys(row) for row in results]
 
+    async def aggregate(
+        self, ast: exp.Select, interpret_numeric: bool = True
+    ) -> List[Dict[str, Any]]:
+        """
+        Performs an application-side aggregation (SUM, AVG, COUNT)
+         on a Redis namespace.
+        This method handles simple aggregations without a GROUP BY clause.
+        """
+        table_name = ast.find(exp.Table).name
+        all_data = await self.get_all(table_name)
+
+        result_row = {}
+
+        if not all_data:
+            msg = f"No data found for table '{table_name}' "
+            msg += "during aggregation. Returning zero values."
+            logging.warning(msg)
+            for expr in ast.expressions:
+                if isinstance(expr, exp.Alias) and isinstance(
+                    expr.this, exp.AggFunc
+                ):  # noqa: E501
+                    alias = expr.alias_or_name
+                    result_row[alias] = (
+                        0
+                        if isinstance(expr.this, exp.Count)
+                        else Decimal("0.0")  # noqa: E501
+                    )
+            return [_camelize_keys(result_row)]
+
+        for expr in ast.expressions:
+            if isinstance(expr, exp.Alias) and isinstance(
+                expr.this, exp.AggFunc
+            ):  # noqa: E501
+                agg_func = expr.this
+                alias = expr.alias_or_name
+
+                if isinstance(agg_func, exp.Count):
+                    result_row[alias] = len(all_data)
+                    continue
+
+                if not agg_func.this:
+                    msg = f"Aggregation function '{type(agg_func).__name__}' "
+                    msg += "has no column. Skipping."
+                    logging.warning(msg)
+                    continue
+
+                inner_expr = agg_func.this
+                values = [
+                    self._eval_expression(inner_expr, row, interpret_numeric)
+                    for row in all_data
+                ]
+
+                if isinstance(agg_func, exp.Sum):
+                    result_row[alias] = sum(values)
+                elif isinstance(agg_func, exp.Avg):
+                    result_row[alias] = (
+                        sum(values) / Decimal(len(values))
+                        if values
+                        else Decimal("0.0")  # noqa: E501
+                    )
+                else:
+                    logging.warning(
+                        f"Unsupported aggregation function: {type(agg_func)}"
+                    )
+
+        return [_camelize_keys(result_row)]
+
     async def bulk_insert(self, table_name: str, file_path: str) -> int:
         r = self._get_client()
-        if table_name.lower() == "lineitem":
+        if table_name.lower() in ["lineitem", "sales"]:
             await r.flushdb()
 
         schema = TPCH_SCHEMA.get(table_name.lower())
         if not schema:
-            msg = f"No schema definition found for table: {table_name}"
-            raise ValueError(msg)
+            raise ValueError(
+                f"No schema definition found for table: {table_name}"
+            )  # noqa: 501
 
         columns = schema["columns"]
         pk_info = schema["pk"]
         data_type = self._options.get("data_type", "hash")
 
-        dynamic_model = get_pydantic_model(table_name, schema)
+        DynamicModel = get_pydantic_model(table_name, schema)
 
         inserted_count = 0
-        with open(file_path, "r") as f:
-            reader = csv.reader(f, delimiter="|")
-            batch = []
-            for row in reader:
-                if not row or len(row) <= 1:
-                    continue
-                row = row[: len(columns)]
-                if len(row) < len(columns):
-                    continue
-
-                try:
-                    row_dict = dict(zip(columns, row))
-                    validated_data = dynamic_model(**row_dict)
-                    batch.append(validated_data.model_dump())
-                    inserted_count += 1
-                except ValidationError as e:
-                    msg = "Skipping malformed row due to validation"
-                    msg += f" error: {row}. Error: {e}"
-                    logging.warning(msg)
+        batch = []
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                reader = csv.reader(f, delimiter="|")
+                for row in reader:
+                    if not row or len(row) < len(columns):
+                        continue
+                    row = row[: len(columns)]
+                    try:
+                        row_dict = dict(zip(columns, row))
+                        validated_data = DynamicModel(**row_dict)
+                        batch.append(validated_data.model_dump())
+                        inserted_count += 1
+                    except ValidationError as e:
+                        msg = "Skipping malformed row due to validation error:"
+                        msg += f" {row}. Error: {e}"
+                        logging.warning(msg)
+        except FileNotFoundError:
+            logging.error(f"File not found for bulk insert: {file_path}")
+            return 0
+        except Exception as e:
+            msg = "An unexpected error occurred during "
+            msg += f"bulk insert from {file_path}: {e}"
+            logging.error()
+            return 0
 
         async with r.pipeline(transaction=False) as pipe:
             for payload in batch:
@@ -342,9 +424,8 @@ class RedisConnector(Connector):
                 key = f"{table_name.capitalize()}:{pk_val}"
 
                 if data_type == "hash":
-                    await pipe.hset(
-                        key, mapping={k: str(v) for k, v in payload.items()}
-                    )
+                    str_payload = {k: str(v) for k, v in payload.items()}
+                    await pipe.hset(key, mapping=str_payload)
                 elif data_type == "string":
                     await pipe.set(key, json.dumps(payload, default=str))
                 elif data_type == "json":
@@ -352,7 +433,7 @@ class RedisConnector(Connector):
                         k: (v.isoformat() if isinstance(v, date) else v)
                         for k, v in payload.items()
                     }
-                    pipe.json().set(key, "$", serializable_payload)
+                    await pipe.json().set(key, "$", serializable_payload)
             await pipe.execute()
 
         return inserted_count
