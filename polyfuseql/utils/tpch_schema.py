@@ -1,11 +1,13 @@
-# Central repository for TPC-H table schemas.
+# Central repository for TPC-H table schemas with data types.
 TPCH_SCHEMA = {
     "region": {
         "columns": ["r_regionkey", "r_name", "r_comment"],
+        "types": ["int", "str", "str"],
         "pk": "r_regionkey",
     },
     "nation": {
         "columns": ["n_nationkey", "n_name", "n_regionkey", "n_comment"],
+        "types": ["int", "str", "int", "str"],
         "pk": "n_nationkey",
     },
     "part": {
@@ -20,6 +22,17 @@ TPCH_SCHEMA = {
             "p_retailprice",
             "p_comment",
         ],
+        "types": [
+            "int",
+            "str",
+            "str",
+            "str",
+            "str",
+            "int",
+            "str",
+            "decimal",
+            "str",
+        ],  # noqa:F501
         "pk": "p_partkey",
     },
     "supplier": {
@@ -32,6 +45,7 @@ TPCH_SCHEMA = {
             "s_acctbal",
             "s_comment",
         ],
+        "types": ["int", "str", "str", "int", "str", "decimal", "str"],
         "pk": "s_suppkey",
     },
     "partsupp": {
@@ -42,6 +56,7 @@ TPCH_SCHEMA = {
             "ps_supplycost",
             "ps_comment",
         ],
+        "types": ["int", "int", "int", "decimal", "str"],
         "pk": ["ps_partkey", "ps_suppkey"],
     },
     "customer": {
@@ -55,6 +70,7 @@ TPCH_SCHEMA = {
             "c_mktsegment",
             "c_comment",
         ],
+        "types": ["int", "str", "str", "int", "str", "decimal", "str", "str"],
         "pk": "c_custkey",
     },
     "orders": {
@@ -69,6 +85,17 @@ TPCH_SCHEMA = {
             "o_shippriority",
             "o_comment",
         ],
+        "types": [
+            "int",
+            "int",
+            "str",
+            "decimal",
+            "date",
+            "str",
+            "str",
+            "int",
+            "str",
+        ],  # noqa:F501
         "pk": "o_orderkey",
     },
     "lineitem": {
@@ -90,10 +117,29 @@ TPCH_SCHEMA = {
             "l_shipmode",
             "l_comment",
         ],
+        "types": [
+            "int",
+            "int",
+            "int",
+            "int",
+            "decimal",
+            "decimal",
+            "decimal",
+            "decimal",
+            "str",
+            "str",
+            "date",
+            "date",
+            "date",
+            "str",
+            "str",
+            "str",
+        ],
         "pk": ["l_orderkey", "l_linenumber"],
     },
     "sales": {
         "columns": ["sale_id", "amount", "sale_date"],
+        "types": ["int", "decimal", "date"],
         "pk": "sale_id",
     },
 }

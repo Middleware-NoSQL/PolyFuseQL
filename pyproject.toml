@@ -25,6 +25,7 @@ starlette = "0.47.2"
 rich = "^13.7.1"
 configargparse = "1.7.1"
 pydantic = "^2.11.7"
+pyspark = "^4.0.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest          = "^8.3.5"

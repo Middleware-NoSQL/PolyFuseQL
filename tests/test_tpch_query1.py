@@ -75,6 +75,16 @@ PART_FIXTURE = FIXTURE_DIR / "part.tbl"
 SUPPLIER_FIXTURE = FIXTURE_DIR / "supplier.tbl"
 PARTSUPP_FIXTURE = FIXTURE_DIR / "partsupp.tbl"
 
+# FIXTURE_DIR = Path(Path(__file__).parent).parent / "docker" / "tpch-data"
+# LINEITEM_FIXTURE = FIXTURE_DIR / "lineitem.tbl"
+# ORDERS_FIXTURE = FIXTURE_DIR / "orders.tbl"
+# CUSTOMER_FIXTURE = FIXTURE_DIR / "customer.tbl"
+# NATION_FIXTURE = FIXTURE_DIR / "nation.tbl"
+# REGION_FIXTURE = FIXTURE_DIR / "region.tbl"
+# PART_FIXTURE = FIXTURE_DIR / "part.tbl"
+# SUPPLIER_FIXTURE = FIXTURE_DIR / "supplier.tbl"
+# PARTSUPP_FIXTURE = FIXTURE_DIR / "partsupp.tbl"
+
 
 def round_results(results):
     """Rounds all decimal/float values in the results for comparison."""
