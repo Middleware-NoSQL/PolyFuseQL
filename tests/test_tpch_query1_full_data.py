@@ -1,4 +1,4 @@
-# ruff: noqa: E501
+# ruff: disable=F501
 import pytest
 from pathlib import Path
 from polyfuseql.client import PolyClient
@@ -11,7 +11,7 @@ SELECT l_returnflag, \
       SUM(l_quantity)                                       AS sum_qty, \
       SUM(l_extendedprice)                                  AS sum_base_price,\
       SUM(l_extendedprice * (1 - l_discount))               AS sum_disc_price,\
-      SUM(l_extendedprice * (1 - l_discount) * (1 + l_tax)) AS sum_charge, \
+      SUM(l_extendedprice * (1 - l_discount) * (1 + l_tax)) AS sum_charge,\
       AVG(l_quantity)                                       AS avg_qty, \
       AVG(l_extendedprice)                                  AS avg_price, \
       AVG(l_discount)                                       AS avg_disc, \
@@ -22,7 +22,7 @@ GROUP BY l_returnflag, \
         l_linestatus
 ORDER BY l_returnflag, \
         l_linestatus; \
-"""  # noqa:F501
+               """
 
 # Define the base directory for TPC-H data files.
 FIXTURE_DIR = Path(Path(__file__).parent).parent / "docker" / "tpch-data"
@@ -60,46 +60,52 @@ async def load_data_into_engine(client, engine):
             pytest.fail(f"Data file not found: {filepath}", pytrace=False)
 
 
-@pytest.mark.asyncio
-async def test_tpch_query1_dynamically():
+@pytest.fixture(scope="session")
+async def ground_truth_from_postgres():
     """
-    Tests TPC-H Query 1 against all supported backends using PostgreSQL as the
-    source of truth for the expected results.
+    Pytest fixture to establish a ground truth by executing the TPC-H query
+    against PostgreSQL. This fixture is session-scoped, so it only runs once,
+    and the result is cached for all tests in the session.
     """
     async with PolyClient.PolyClient() as client:
-        # Step 1: Load the same generated data into all database engines.
-        all_engines = ["postgres", "redis", "neo4j"]
-        for engine in all_engines:
-            await load_data_into_engine(client, engine)
+        # Load data into PostgreSQL to establish the ground truth.
+        print("\nSetting up ground truth from PostgreSQL...")
+        await load_data_into_engine(client, "postgres")
 
-        # Step 2: Execute the query on PostgreSQL to get the ground truth.
-        ground_truth_results = await client.execute(
-            TPCH_QUERY_1, engine="postgres"
-        )  # noqa:F501
+        # Execute the query to get the definitive results for this dataset.
+        results = await client.execute(TPCH_QUERY_1, engine="postgres")
+        msg = "PostgreSQL did not return any results for ground truth."
+        assert results, msg  # noqa:F501
 
-        # The ground truth must not be empty.
-        assert ground_truth_results, "PostgreSQL did not return any results."
+        # Round and sort for stable comparison.
+        expected = round_results(results)
+        expected.sort(key=lambda x: (x["lReturnflag"], x["lLinestatus"]))
+        print("Ground truth established.")
+        return expected
 
-        # Round and sort the ground truth results for stable comparison.
-        expected_results = round_results(ground_truth_results)
-        expected_results.sort(
-            key=lambda x: (x["lReturnflag"], x["lLinestatus"])
-        )  # noqa:F501
 
-        # Step 3: Test the other engines (Redis, Neo4j)
-        # against the ground truth.
-        for engine in ["redis", "neo4j"]:
-            # Execute the query on the current engine.
-            results = await client.execute(TPCH_QUERY_1, engine=engine)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["redis", "neo4j"])
+async def test_tpch_query1_against_ground_truth(
+    engine, ground_truth_from_postgres
+):  # noqa:F501
+    """
+    Tests TPC-H Query 1 against specified backends (Redis, Neo4j) by
+    comparing their results to the PostgreSQL ground truth.
+    Use `pytest -k <engine_name>` to run for a specific engine.
+    """
+    async with PolyClient.PolyClient() as client:
+        # Step 1: Load data into the target engine for the current test run.
+        await load_data_into_engine(client, engine)
 
-            # Round and sort the actual results.
-            rounded_res = round_results(results)
-            rounded_res.sort(
-                key=lambda x: (x["lReturnflag"], x["lLinestatus"])
-            )  # noqa:F501
+        # Step 2: Execute the query on the current engine.
+        results = await client.execute(TPCH_QUERY_1, engine=engine)
 
-            # Compare the engine's result with the ground truth
-            # from PostgreSQL.
-            assert (
-                rounded_res == expected_results
-            ), f"Results for {engine} do not match PostgreSQL."
+        # Step 3: Round and sort the actual results from the target engine.
+        rounded_res = round_results(results)
+        rounded_res.sort(key=lambda x: (x["lReturnflag"], x["lLinestatus"]))
+
+        # Step 4: Compare the engine's result with the cached ground truth.
+        assert (
+            rounded_res == ground_truth_from_postgres
+        ), f"Results for {engine} do not match PostgreSQL ground truth."

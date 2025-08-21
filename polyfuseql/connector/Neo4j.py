@@ -17,7 +17,7 @@ from pyspark.sql.types import (
     StringType,
     DateType,
     DecimalType,
-)  # noqa:F501
+)
 
 
 class Neo4jConnector(Connector):
@@ -40,13 +40,36 @@ class Neo4jConnector(Connector):
         self._uri = f"bolt://{host}:{port}"
         self._auth = (user, password)
         self._driver: Optional[AsyncDriver] = None
-        # Initialize Spark Session
-        self.spark = (
-            SparkSession.builder.appName("Neo4jConnector")
-            .master("local[*]")
-            .config("spark.driver.memory", "4g")
-            .getOrCreate()
+
+        # --- Spark Session Configuration ---
+        # To use workers, you must run a Spark Standalone cluster.
+        # 1. Start Master: ./sbin/start-master.sh
+        # 2. Start Worker: ./sbin/start-worker.sh spark://<your-ip>:7077
+        # The master URL will be printed when you start the master.
+        spark_master_url = "local[*]"  # Default to local mode
+        # spark_master_url = "spark://<your-ip>:7077"
+        # Example for standalone cluster
+
+        builder = SparkSession.builder.appName("Neo4jConnector").master(
+            spark_master_url
         )
+
+        if "local" not in spark_master_url:
+            # --- Configuration for a Normal PC ---
+            # Use a portion of resources to keep the system responsive.
+            builder = builder.config("spark.driver.memory", "2g")
+            builder = builder.config("spark.executor.cores", "4")
+            builder = builder.config("spark.executor.memory", "8g")
+
+            # --- Configuration for a High-Memory Server ---
+            # Uncomment below to configure for a server with more resources.
+            # builder = builder.config("spark.driver.memory", "8g")
+            # builder = builder.config("spark.executor.instances", "6")
+            # builder = builder.config("spark.executor.cores", "5")
+            # builder = builder.config("spark.executor.memory", "15g")
+            # builder = builder.config("spark.sql.shuffle.partitions", "200")
+
+        self.spark = builder.getOrCreate()
         logging.info("Spark session initialized.")
 
     async def connect(self) -> None:
@@ -195,10 +218,6 @@ class Neo4jConnector(Connector):
         """Generates a Spark schema from the TPCH schema definition."""
         sch_def = TPCH_SCHEMA.get(table_name.lower())
         if not sch_def:
-            # For the simple aggregation test, the 'sales' schema
-            # is not in TPCH_SCHEMA
-            # We can handle this case by inferring a
-            # simple schema or defining it here.
             if table_name.lower() == "sales":
                 return StructType(
                     [
@@ -241,8 +260,45 @@ class Neo4jConnector(Connector):
                 fields.append(StructField(c_name, StringType(), True))
         return StructType(fields)
 
+    def _translate_expression_to_spark(self, expr):
+        """Recursively translates a sqlglot expression
+        into a PySpark column expression."""
+        if isinstance(expr, exp.Column):
+            return F.col(expr.sql())
+        if isinstance(expr, exp.Literal):
+            if expr.is_string:
+                return F.lit(expr.this)
+            return F.lit(Decimal(expr.this))
+        if isinstance(expr, exp.Mul):
+            left = self._translate_expression_to_spark(expr.left)
+            right = self._translate_expression_to_spark(expr.right)
+            return left * right
+        if isinstance(expr, exp.Sub):
+            left = self._translate_expression_to_spark(expr.left)
+            right = self._translate_expression_to_spark(expr.right)
+            return left - right
+        if isinstance(expr, exp.Add):
+            left = self._translate_expression_to_spark(expr.left)
+            right = self._translate_expression_to_spark(expr.right)
+            return left + right
+        if isinstance(expr, exp.LTE):
+            left = self._translate_expression_to_spark(expr.left)
+            right = self._translate_expression_to_spark(expr.right)
+            return left <= right
+        if isinstance(expr, exp.Paren):
+            return self._translate_expression_to_spark(expr.this)
+        if (
+            isinstance(expr, exp.Cast)
+            and expr.to.this == exp.DataType.Type.DATE  # noqa:F501
+        ):  # noqa:F501
+            return F.to_date(self._translate_expression_to_spark(expr.this))
+        if isinstance(expr, exp.Star):
+            return F.lit(1)
+
+        raise NotImplementedError(f"Unsupported expression type: {type(expr)}")
+
     async def group_by(self, ast: exp.Select) -> List[Dict[str, Any]]:
-        """Performs a GROUP BY operation using PySpark for efficiency."""
+        """Performs a GROUP BY operation using the PySpark DataFrame API."""
         table_name = ast.find(exp.Table).name
         all_data = await self.get_all(table_name)
 
@@ -257,7 +313,7 @@ class Neo4jConnector(Connector):
             )
             if "decimal" in type_str
         }
-        if table_name.lower() == "sales":  # Handle test case
+        if table_name.lower() == "sales":
             decimal_cols.add("amount")
 
         for row in all_data:
@@ -271,21 +327,10 @@ class Neo4jConnector(Connector):
         df = self.spark.createDataFrame(all_data, schema=spark_schema)
 
         if ast.args.get("where"):
-            where_expr = ast.args["where"].this
-            if isinstance(where_expr, exp.LTE):
-                col = where_expr.left.sql()
-                # Correctly extract the date string from the sqlglot expression
-                # The expression `date 'YYYY-MM-DD'` is
-                # parsed as a Cast expression
-                if isinstance(where_expr.right, exp.Cast) and isinstance(
-                    where_expr.right.this, exp.Literal
-                ):
-                    date_val = where_expr.right.this.this
-                else:
-                    # Fallback for other potential date formats,
-                    # though less likely for TPC-H
-                    date_val = where_expr.right.sql().strip("'")
-                df = df.filter(F.col(col) <= F.lit(date_val))
+            where_condition = self._translate_expression_to_spark(
+                ast.args["where"].this
+            )
+            df = df.filter(where_condition)
 
         group_by_cols = [e.sql() for e in ast.args.get("group").expressions]
 
@@ -297,26 +342,33 @@ class Neo4jConnector(Connector):
 
             if isinstance(expr, exp.Alias):
                 agg_func = expr.this
-                # Use the helper to translate the inner expression for Spark
-                inner_expr_str = self._translate_agg_expr_spark(agg_func.this)
+                spark_col_expr = self._translate_expression_to_spark(
+                    agg_func.this
+                )  # noqa:F501
+
+                if not isinstance(agg_func.this, (exp.Column, exp.Star)):
+                    spark_col_expr = spark_col_expr.cast(DecimalType(38, 10))
 
                 if isinstance(agg_func, exp.Count):
                     agg_expressions.append(
-                        F.count(F.expr(inner_expr_str)).alias(alias)
+                        F.count(spark_col_expr).alias(alias)
                     )  # noqa:F501
                 elif isinstance(agg_func, exp.Sum):
-                    agg_expressions.append(
-                        F.sum(F.expr(inner_expr_str)).alias(alias)
-                    )  # noqa:F501
+                    agg_expressions.append(F.sum(spark_col_expr).alias(alias))
                 elif isinstance(agg_func, exp.Avg):
-                    agg_expressions.append(
-                        F.avg(F.expr(inner_expr_str)).alias(alias)
-                    )  # noqa:F501
+                    agg_expressions.append(F.avg(spark_col_expr).alias(alias))
 
-        if not agg_expressions:
-            result_df = df.select(*group_by_cols).distinct()
-        else:
-            result_df = df.groupBy(*group_by_cols).agg(*agg_expressions)
+        result_df = df.groupBy(*group_by_cols).agg(*agg_expressions)
+
+        if ast.args.get("order"):
+            order_by_cols = []
+            for ob in ast.args["order"].expressions:
+                col_name = ob.this.sql()
+                if ob.args.get("desc", False):
+                    order_by_cols.append(F.col(col_name).desc())
+                else:
+                    order_by_cols.append(F.col(col_name).asc())
+            result_df = result_df.orderBy(*order_by_cols)
 
         select_cols = [e.alias_or_name for e in ast.expressions]
         result_df = result_df.select(*select_cols)
@@ -341,7 +393,7 @@ class Neo4jConnector(Connector):
             )
             if "decimal" in type_str
         }
-        if table_name.lower() == "sales":  # Handle test case
+        if table_name.lower() == "sales":
             decimal_cols.add("amount")
 
         for row in all_data:
@@ -360,20 +412,18 @@ class Neo4jConnector(Connector):
             core_expr = expr.this if isinstance(expr, exp.Alias) else expr
 
             if isinstance(core_expr, exp.AggFunc):
-                inner_expr_str = self._translate_agg_expr_spark(core_expr.this)
+                spark_col_expr = self._translate_expression_to_spark(
+                    core_expr.this
+                )  # noqa:F501
 
                 if isinstance(core_expr, exp.Count):
                     agg_expressions.append(
-                        F.count(F.expr(inner_expr_str)).alias(alias)
+                        F.count(spark_col_expr).alias(alias)
                     )  # noqa:F501
                 elif isinstance(core_expr, exp.Sum):
-                    agg_expressions.append(
-                        F.sum(F.expr(inner_expr_str)).alias(alias)
-                    )  # noqa:F501
+                    agg_expressions.append(F.sum(spark_col_expr).alias(alias))
                 elif isinstance(core_expr, exp.Avg):
-                    agg_expressions.append(
-                        F.avg(F.expr(inner_expr_str)).alias(alias)
-                    )  # noqa:F501
+                    agg_expressions.append(F.avg(spark_col_expr).alias(alias))
             else:
                 raise NotImplementedError(
                     f"Unsupported expression in aggregate: {expr.sql()}"
@@ -382,33 +432,6 @@ class Neo4jConnector(Connector):
         result_df = df.agg(*agg_expressions)
         results = [row.asDict() for row in result_df.collect()]
         return [_camelize_keys(row) for row in results]
-
-    def _translate_agg_expr_spark(self, expr):
-        """Recursively translates a sqlglot expression
-        into a Spark SQL string."""
-        if isinstance(expr, exp.Star):
-            return "*"
-        if isinstance(expr, exp.Paren):
-            return f"({self._translate_agg_expr_spark(expr.this)})"
-        if isinstance(expr, exp.Column):
-            return expr.sql()
-        if isinstance(expr, exp.Literal):
-            return expr.sql()
-        if isinstance(expr, exp.Mul):
-            left = self._translate_agg_expr_spark(expr.left)
-            right = self._translate_agg_expr_spark(expr.right)
-            return f"({left} * {right})"
-        if isinstance(expr, exp.Sub):
-            left = self._translate_agg_expr_spark(expr.left)
-            right = self._translate_agg_expr_spark(expr.right)
-            return f"({left} - {right})"
-        if isinstance(expr, exp.Add):
-            left = self._translate_agg_expr_spark(expr.left)
-            right = self._translate_agg_expr_spark(expr.right)
-            return f"({left} + {right})"
-        raise NotImplementedError(
-            f"Unsupported expression type in aggregation: {type(expr)}"
-        )
 
     async def bulk_insert(
         self, table_name: str, file_path: str, batch_size: int = 5000
@@ -420,7 +443,6 @@ class Neo4jConnector(Connector):
         driver = self._get_driver()
         schema = TPCH_SCHEMA.get(table_name.lower())
         if not schema:
-            # Handle the 'sales' fixture for the test case
             if table_name.lower() == "sales":
                 schema = {
                     "columns": ["sale_id", "amount", "sale_date"],

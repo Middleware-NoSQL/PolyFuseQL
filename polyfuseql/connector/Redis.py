@@ -4,7 +4,7 @@ from polyfuseql.connector.Connector import Connector
 from polyfuseql.utils.utils import env, _camelize_keys, get_pydantic_model
 from polyfuseql.utils.tpch_schema import TPCH_SCHEMA
 import redis.asyncio as aioredis
-from sqlglot import exp, transpile
+from sqlglot import exp
 import csv
 from datetime import datetime
 from pydantic import ValidationError
@@ -13,6 +13,7 @@ from decimal import Decimal, InvalidOperation
 # PySpark Integration
 try:
     from pyspark.sql import SparkSession
+    from pyspark.sql import functions as F
     from pyspark.sql.types import (
         StructType,
         StructField,
@@ -29,8 +30,8 @@ except ImportError:
 
 
 class RedisConnector(Connector):
-    """Connector for Redis with persistent connection handling and
-    PySpark for complex queries."""
+    """Connector for Redis with persistent connection handling
+    and PySpark for complex queries."""
 
     def __init__(self, options: Optional[Dict] = None) -> None:
         super().__init__(options or {})
@@ -44,18 +45,50 @@ class RedisConnector(Connector):
         """Initializes and returns a local SparkSession
         if PySpark is available."""
         if not SPARK_AVAILABLE:
-            msg = "PySpark not found. Complex queries like JOIN "
-            msg += "and GROUP BY will be slow and memory-intensive."
+            msg = "PySpark not found. Complex queries like JOIN and "
+            msg += "GROUP BY will be slow and memory-intensive."
             logging.warning(msg)
             return None
         try:
-            return (
-                SparkSession.builder.appName("PolyFuseQL-RedisConnector")
-                .master("local[*]")
-                .config("spark.driver.memory", "4g")
+            # --- Spark Session Configuration ---
+            # To use workers, you must run a Spark Standalone cluster.
+            # 1. Start Master: ./sbin/start-master.sh
+            # 2. Start Worker: ./sbin/start-worker.sh spark://<your-ip>:7077
+            # The master URL will be printed when you start the master.
+            spark_master_url = "local[*]"  # Default to local mode
+            # spark_master_url = "spark://<your-ip>:7077"
+            # Example for standalone cluster
+
+            builder = (
+                SparkSession.builder.appName("RedisConnector")
+                .master(spark_master_url)
                 .config("spark.sql.legacy.timeParserPolicy", "LEGACY")
-                .getOrCreate()
             )
+
+            if "local" not in spark_master_url:
+                # --- Configuration for a Normal PC ---
+                # Use a portion of resources to keep the system responsive.
+                builder = builder.config("spark.driver.memory", "2g")
+                builder = builder.config("spark.executor.cores", "4")
+                builder = builder.config("spark.executor.memory", "8g")
+
+                # --- Configuration for a High-Memory Server ---
+                # Uncomment below to configure for
+                # a server with more resources.
+                # builder = builder.config("spark.driver.memory", "8g")
+                # builder = builder.config("spark.executor.instances", "6")
+                # builder = builder.config("spark.executor.cores", "5")
+                # builder = builder.config("spark.executor.memory", "15g")
+                # builder = builder
+                #   .config("spark.sql.shuffle.partitions", "200")
+            else:
+                # Default memory for local mode
+                builder = builder.config("spark.driver.memory", "4g")
+
+            self.spark = builder.getOrCreate()
+            logging.info("Spark session initialized.")
+            return self.spark
+
         except PySparkException as e:
             logging.error(f"Failed to initialize SparkSession: {e}")
             return None
@@ -102,18 +135,20 @@ class RedisConnector(Connector):
                 break
         return total
 
-    async def get(self, ent: str, pk_col: str, pk_val: Any) -> Dict[str, Any]:
+    async def get(
+        self, entity: str, pk_col: str, pk_val: Any
+    ) -> Dict[str, Any]:  # noqa:F501
         r = self._get_client()
-        key = f"{ent.capitalize()}:{pk_val}"
+        key = f"{entity.capitalize()}:{pk_val}"
         raw_data = await r.hgetall(key)  # Assuming HASH for simplicity
         if not raw_data:
             return {}
 
-        schema = TPCH_SCHEMA.get(ent.lower())
+        schema = TPCH_SCHEMA.get(entity.lower())
         if not schema:
             return raw_data
 
-        DynamicModel = get_pydantic_model(ent, schema)
+        DynamicModel = get_pydantic_model(entity, schema)
         try:
             validated_model = DynamicModel(**raw_data)
             return validated_model.model_dump()
@@ -159,13 +194,15 @@ class RedisConnector(Connector):
         results = await pipe.execute()
         return [dict(res) for res in results if res]
 
-    async def query(self, sql: str, arg: tuple = None) -> List[dict[str, Any]]:
+    async def query(
+        self, sql: str, params: tuple = None
+    ) -> List[dict[str, Any]]:  # noqa:F501
         msg = "RedisConnector does not support raw SQL queries."
         raise NotImplementedError(msg)
 
     def _get_spark_schema(self, table_name: str) -> Optional["StructType"]:
-        sc_def = TPCH_SCHEMA.get(table_name.lower())
-        if not sc_def:
+        schema_def = TPCH_SCHEMA.get(table_name.lower())
+        if not schema_def:
             return None
         type_mapping = {
             "int": IntegerType(),
@@ -174,10 +211,53 @@ class RedisConnector(Connector):
             "decimal": DecimalType(18, 4),
         }
         fields = [
-            StructField(c_name, type_mapping.get(col_type, StringType()), True)
-            for c_name, col_type in zip(sc_def["columns"], sc_def["types"])
+            StructField(
+                col_name, type_mapping.get(col_type, StringType()), True
+            )  # noqa:F501
+            for col_name, col_type in zip(
+                schema_def["columns"], schema_def["types"]
+            )  # noqa:F501
         ]
         return StructType(fields)
+
+    def _translate_expression_to_spark(self, expression: exp.Expression):
+        """Recursively translates a sqlglot expression to
+        a PySpark Column expression."""
+        if isinstance(expression, exp.Star):
+            return F.lit(1)  # For use in COUNT(*) -> F.count(F.lit(1))
+        if isinstance(expression, exp.Column):
+            return F.col(expression.this.name)
+        if isinstance(expression, exp.Literal):
+            # Ensure literals used in calculations are treated as Decimals
+            try:
+                return F.lit(Decimal(expression.this))
+            except InvalidOperation:
+                return F.lit(expression.this)
+        if isinstance(expression, exp.Paren):
+            return self._translate_expression_to_spark(expression.this)
+
+        # Handle binary operations
+        if isinstance(expression, exp.Binary):
+            left = self._translate_expression_to_spark(expression.left)
+            right = self._translate_expression_to_spark(expression.right)
+            if isinstance(expression, exp.Mul):
+                return left * right
+            if isinstance(expression, exp.Sub):
+                return left - right
+            if isinstance(expression, exp.Add):
+                return left + right
+            if isinstance(expression, exp.LTE):
+                return left <= right
+
+        # Handle date casting e.g., date '1998-09-02'
+        if (
+            isinstance(expression, exp.Cast)
+            and expression.to.this == exp.DataType.Type.DATE
+        ):
+            return F.to_date(F.lit(expression.this.this))
+        msg = "Unsupported SQL expression for "
+        msg += f"Spark translation: {type(expression)}"
+        raise NotImplementedError(msg)
 
     async def join(self, ast: exp.Select) -> List[Dict[str, Any]]:
         if not self.spark:
@@ -194,67 +274,110 @@ class RedisConnector(Connector):
         if not all_data:
             return []
 
-        spark_sc = self._get_spark_schema(table_name)
-        if not spark_sc:
+        spark_schema = self._get_spark_schema(table_name)
+        if not spark_schema:
             raise ValueError(f"No Spark schema for table {table_name}")
 
-        # Identify columns by their target Spark type
+        # Pre-process data from Redis to match the schema types
         date_cols = {
-            f.name for f in spark_sc.fields if isinstance(f.dataType, DateType)
+            f.name
+            for f in spark_schema.fields
+            if isinstance(f.dataType, DateType)  # noqa:F501
         }
         int_cols = {
             f.name
-            for f in spark_sc.fields
+            for f in spark_schema.fields
             if isinstance(f.dataType, IntegerType)  # noqa:F501
         }
         decimal_cols = {
             f.name
-            for f in spark_sc.fields
+            for f in spark_schema.fields
             if isinstance(f.dataType, DecimalType)  # noqa:F501
         }
-
-        # Pre-process the raw string data from Redis to match the schema types
         for row in all_data:
-            for col_name in date_cols:
-                if row.get(col_name):
-                    try:
-                        row[col_name] = datetime.strptime(
-                            row[col_name], "%Y-%m-%d"
-                        ).date()
-                    except (ValueError, TypeError):
-                        row[col_name] = None
-            for col_name in int_cols:
-                if row.get(col_name):
-                    try:
-                        row[col_name] = int(row[col_name])
-                    except (ValueError, TypeError):
-                        row[col_name] = None
-            for col_name in decimal_cols:
-                if row.get(col_name):
-                    try:
-                        row[col_name] = Decimal(row[col_name])
-                    except (InvalidOperation, TypeError):
-                        row[col_name] = None
+            for col in date_cols:
+                if row.get(col):
+                    row[col] = datetime.strptime(row[col], "%Y-%m-%d").date()
+            for col in int_cols:
+                if row.get(col):
+                    row[col] = int(row[col])
+            for col in decimal_cols:
+                if row.get(col):
+                    row[col] = Decimal(row[col])
 
-        df = self.spark.createDataFrame(all_data, schema=spark_sc)
-        temp_view_name = f"{table_name}_view"
-        df.createOrReplaceTempView(temp_view_name)
+        df = self.spark.createDataFrame(all_data, schema=spark_schema)
 
-        original_sql = ast.sql(dialect="duckdb")
-        spark_sql = transpile(original_sql, read="duckdb", write="spark")[0]
-        spark_sql = spark_sql.replace(f"`{table_name}`", temp_view_name)
-        spark_sql = spark_sql.replace(f'"{table_name}"', temp_view_name)
-        spark_sql = spark_sql.replace(f" {table_name} ", f" {temp_view_name} ")
+        # 1. Apply WHERE clause
+        where_clause = ast.args.get("where")
+        if where_clause:
+            filter_condition = self._translate_expression_to_spark(
+                where_clause.this
+            )  # noqa:F501
+            df = df.filter(filter_condition)
 
-        result_df = self.spark.sql(spark_sql)
-        results = [row.asDict() for row in result_df.collect()]
+        # 2. Apply GROUP BY
+        group_by_cols = [
+            col.this.name for col in ast.args.get("group").expressions
+        ]  # noqa:F501
+        grouped_df = df.groupBy(*group_by_cols)
+
+        # 3. Build aggregation expressions
+        agg_expressions = []
+        final_select_cols = [e.alias_or_name for e in ast.expressions]
+
+        for expression in ast.expressions:
+            if isinstance(expression, exp.Alias) and isinstance(
+                expression.this, exp.AggFunc
+            ):
+                agg_func = expression.this
+                alias = expression.alias_or_name
+                inner_expr = self._translate_expression_to_spark(agg_func.this)
+
+                # Define a high-precision decimal type for
+                # casting calculation results
+                high_precision_decimal = DecimalType(38, 6)
+
+                if isinstance(agg_func, exp.Sum):
+                    agg_expr = (
+                        F.sum(inner_expr)
+                        .cast(high_precision_decimal)
+                        .alias(alias)  # noqa:F501
+                    )
+                elif isinstance(agg_func, exp.Avg):
+                    agg_expr = (
+                        F.avg(inner_expr)
+                        .cast(high_precision_decimal)
+                        .alias(alias)  # noqa:F501
+                    )
+                elif isinstance(agg_func, exp.Count):
+                    agg_expr = F.count(inner_expr).alias(alias)
+                else:
+                    raise NotImplementedError(
+                        f"Unsupported aggregate function: {type(agg_func)}"
+                    )
+                agg_expressions.append(agg_expr)
+
+        agg_df = grouped_df.agg(*agg_expressions)
+
+        # 4. Apply ORDER BY
+        order_by_clause = ast.args.get("order")
+        if order_by_clause:
+            order_cols = [
+                col.this.this.name for col in order_by_clause.expressions
+            ]  # noqa:F501
+            agg_df = agg_df.orderBy(*order_cols)
+
+        # Ensure final column order matches the original query
+        final_df = agg_df.select(*final_select_cols)
+
+        results = [row.asDict() for row in final_df.collect()]
         return [_camelize_keys(row) for row in results]
 
     async def aggregate(self, ast: exp.Select) -> List[Dict[str, Any]]:
         table_name = ast.find(exp.Table).name
-        data = await self.get_all(table_name)
+        all_data = await self.get_all(table_name)
         result_row = {}
-        if not data:
+        if not all_data:
             return [{}]
         for expr in ast.expressions:
             if isinstance(expr, exp.Alias) and isinstance(
@@ -264,10 +387,13 @@ class RedisConnector(Connector):
                 alias = expr.alias_or_name
 
                 if isinstance(agg_func, exp.Count):
-                    result_row[alias] = len(data)
+                    result_row[alias] = len(all_data)
                     continue
 
-                values = [self._eval_expr(agg_func.this, row) for row in data]
+                values = [
+                    self._evaluate_expression(agg_func.this, row)
+                    for row in all_data  # noqa:F501
+                ]
 
                 if isinstance(agg_func, exp.Sum):
                     result_row[alias] = sum(values)
@@ -303,8 +429,9 @@ class RedisConnector(Connector):
                         batch.append(validated_data.model_dump())
                         inserted_count += 1
                     except ValidationError as e:
-                        msg = f"Skipping malformed row: {row}. Error: {e}"
-                        logging.warning(msg)
+                        logging.warning(
+                            f"Skipping malformed row: {row}. Error: {e}"
+                        )  # noqa:F501
         except FileNotFoundError:
             logging.error(f"File not found: {file_path}")
             return 0
@@ -322,27 +449,29 @@ class RedisConnector(Connector):
             await pipe.execute()
         return inserted_count
 
-    def _eval_expr(self, expr, row_data):
-        if isinstance(expr, exp.Column):
-            val = row_data.get(expr.sql())
+    def _evaluate_expression(self, expression, row_data):
+        if isinstance(expression, exp.Column):
+            val = row_data.get(expression.sql())
             try:
                 return Decimal(val) if val is not None else Decimal("0.0")
             except (InvalidOperation, TypeError):
                 return Decimal("0.0")
-        if isinstance(expr, exp.Literal):
-            return Decimal(expr.this)
-        if isinstance(expr, exp.Mul):
-            return self._eval_expr(expr.left, row_data) * self._eval_expr(
-                expr.right, row_data
-            )
-        if isinstance(expr, exp.Sub):
-            return self._eval_expr(expr.left, row_data) - self._eval_expr(
-                expr.right, row_data
-            )
-        if isinstance(expr, exp.Add):
-            return self._eval_expr(expr.left, row_data) + self._eval_expr(
-                expr.right, row_data
-            )
-        if isinstance(expr, exp.Paren):
-            return self._eval_expr(expr.this, row_data)
-        raise NotImplementedError(f"Unsupported expression: {type(expr)}")
+        if isinstance(expression, exp.Literal):
+            return Decimal(expression.this)
+        if isinstance(expression, exp.Mul):
+            return self._evaluate_expression(
+                expression.left, row_data
+            ) * self._evaluate_expression(expression.right, row_data)
+        if isinstance(expression, exp.Sub):
+            return self._evaluate_expression(
+                expression.left, row_data
+            ) - self._evaluate_expression(expression.right, row_data)
+        if isinstance(expression, exp.Add):
+            return self._evaluate_expression(
+                expression.left, row_data
+            ) + self._evaluate_expression(expression.right, row_data)
+        if isinstance(expression, exp.Paren):
+            return self._evaluate_expression(expression.this, row_data)
+        raise NotImplementedError(
+            f"Unsupported expression: {type(expression)}"
+        )  # noqa:F501
