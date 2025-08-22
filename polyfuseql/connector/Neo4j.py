@@ -76,8 +76,11 @@ class Neo4jConnector(Connector):
         if not self._driver:
             # The modern neo4j driver automatically
             # detects the running event loop.
-            # Explicitly passing the loop is deprecated and causes an error.
-            self._driver = AGD.driver(self._uri, auth=self._auth)
+            # Adding a connection timeout to prevent
+            # hangs on long-running queries.
+            self._driver = AGD.driver(
+                self._uri, auth=self._auth, connection_timeout=30.0
+            )
             logging.info("Neo4j driver initialized.")
             await self.ping()
 
@@ -264,8 +267,8 @@ class Neo4jConnector(Connector):
         return StructType(fields)
 
     def _translate_expression_to_spark(self, expr):
-        """Recursively translates a sqlglot expression
-        into a PySpark column expression."""
+        """Recursively translates a sqlglot expression into a
+        PySpark column expression."""
         if isinstance(expr, exp.Column):
             return F.col(expr.sql())
         if isinstance(expr, exp.Literal):
