@@ -55,7 +55,7 @@ class RedisConnector(Connector):
             # 1. Start Master: ./sbin/start-master.sh
             # 2. Start Worker: ./sbin/start-worker.sh spark://<your-ip>:7077
             # The master URL will be printed when you start the master.
-            spark_master_url = "local[*]"  # Default to local mode
+            spark_master_url = "spark://legion:7077"  # Default to local mode
             # spark_master_url = "spark://<your-ip>:7077"
             # Example for standalone cluster
 
@@ -69,8 +69,8 @@ class RedisConnector(Connector):
                 # --- Configuration for a Normal PC ---
                 # Use a portion of resources to keep the system responsive.
                 builder = builder.config("spark.driver.memory", "2g")
-                builder = builder.config("spark.executor.cores", "4")
-                builder = builder.config("spark.executor.memory", "8g")
+                builder = builder.config("spark.executor.cores", "8")
+                builder = builder.config("spark.executor.memory", "4g")
 
                 # --- Configuration for a High-Memory Server ---
                 # Uncomment below to configure for
