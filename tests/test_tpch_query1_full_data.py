@@ -61,21 +61,24 @@ async def load_data_into_engine(client, engine):
             pytest.fail(f"Data file not found: {filepath}", pytrace=False)
 
 
-@pytest_asyncio.fixture(scope="session")
+@pytest_asyncio.fixture(scope="function")
 async def poly_client():
     """
-    Session-scoped fixture to create a single PolyClient instance for the
-    entire test session, managing the Spark context lifecycle correctly.
+    FIX: Changed scope from 'session' to 'function'.
+    This creates a new client for each test, ensuring the async driver
+    is initialized in the correct event loop provided by pytest-asyncio,
+    which prevents the "attached to a different loop" RuntimeError.
     """
     async with PolyClient.PolyClient() as client:
         yield client
 
 
-@pytest_asyncio.fixture(scope="session")
+@pytest_asyncio.fixture(scope="function")
 async def ground_truth_from_postgres(poly_client):
     """
+    FIX: Changed scope from 'session' to 'function' to match poly_client.
     Establishes the ground truth by executing the TPC-H query against
-    PostgreSQL. It uses the session-scoped poly_client.
+    PostgreSQL. This now runs for each tested backend (e.g., redis, neo4j).
     """
     # Load data into PostgreSQL to establish the ground truth.
     print("\nSetting up ground truth from PostgreSQL...")
@@ -102,10 +105,14 @@ async def test_tpch_query1_against_ground_truth(
     results to the PostgreSQL ground truth.
     """
     # Step 1: Load data into the target engine for the current test run.
+    print(f"\nLoading data into {engine}...")
     await load_data_into_engine(poly_client, engine)
+    print(f"Data loaded into {engine}.")
 
     # Step 2: Execute the query on the current engine.
+    print(f"Executing query on {engine}...")
     results = await poly_client.execute(TPCH_QUERY_1, engine=engine)
+    print(f"Query executed on {engine}.")
 
     # Step 3: Round and sort the actual results from the target engine.
     rounded_res = round_results(results)
