@@ -46,7 +46,7 @@ class Neo4jConnector(Connector):
         # 1. Start Master: ./sbin/start-master.sh
         # 2. Start Worker: ./sbin/start-worker.sh spark://<your-ip>:7077
         # The master URL will be printed when you start the master.
-        spark_master_url = "spark://legion:7077"  # Default to local mode
+        spark_master_url = "local[*]"  # Default to local mode
         # spark_master_url = "spark://<your-ip>:7077"
         # Example for standalone cluster
 
@@ -57,8 +57,8 @@ class Neo4jConnector(Connector):
         if "local" not in spark_master_url:
             # --- Configuration for a Normal PC ---
             # Use a portion of resources to keep the system responsive.
-            builder = builder.config("spark.driver.memory", "4g")
-            builder = builder.config("spark.executor.cores", "6")
+            builder = builder.config("spark.driver.memory", "2g")
+            builder = builder.config("spark.executor.cores", "4")
             builder = builder.config("spark.executor.memory", "8g")
 
             # --- Configuration for a High-Memory Server ---
@@ -74,6 +74,9 @@ class Neo4jConnector(Connector):
 
     async def connect(self) -> None:
         if not self._driver:
+            # The modern neo4j driver automatically
+            # detects the running event loop.
+            # Explicitly passing the loop is deprecated and causes an error.
             self._driver = AGD.driver(self._uri, auth=self._auth)
             logging.info("Neo4j driver initialized.")
             await self.ping()
