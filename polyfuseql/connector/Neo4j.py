@@ -1,5 +1,6 @@
 import csv
 import logging
+import sys
 from datetime import date
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
@@ -33,6 +34,16 @@ class Neo4jConnector(Connector):
 
     def __init__(self, options: Optional[Dict] = None) -> None:
         super().__init__(options)
+
+        # --- SOLUTION: Add proper logging setup ---
+        # This will ensure all logs are printed to the
+        # console during pytest runs
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(message)s",
+            stream=sys.stdout,
+        )
+
         host = env("NEO4J_HOST", "localhost")
         port = env("NEO4J_PORT", "7687")
         user = env("NEO4J_USER", "neo4j")
@@ -41,18 +52,43 @@ class Neo4jConnector(Connector):
         self._auth = (user, password)
         self._driver: Optional[AsyncDriver] = None
 
+        # spark_master_url = "spark://cuscungo:7077"
         spark_master_url = "local[*]"
-        builder = SparkSession.builder.appName("Neo4jConnector").master(
-            spark_master_url
-        )
-
         if "local" not in spark_master_url:
-            builder = builder.config("spark.driver.memory", "2g")
-            builder = builder.config("spark.executor.cores", "4")
-            builder = builder.config("spark.executor.memory", "8g")
+            builder = (
+                SparkSession.builder.appName("Neo4jConnector-TPCH-Benchmark")
+                .master(spark_master_url)
+                .config("spark.cores.max", "48")
+                .config("spark.driver.memory", "4g")
+                .config("spark.executor.memory", "3g")
+                .config("spark.sql.shuffle.partitions", "144")
+                # --- SOLUTION: Increase network timeouts for
+                # long-running jobs ---
+                # Increase the network timeout to 8000 seconds (~133 minutes)
+                .config("spark.network.timeout", "8000s")
+                # Ensure executors send heartbeats frequently to stay alive
+                .config("spark.executor.heartbeatInterval", "60s")
+                .config(
+                    "spark.jars.packages",
+                    "org.neo4j:neo4j-connector-apache-spark_2.12:5.2.0",
+                )
+            )
+        else:
+            builder = (
+                SparkSession.builder.appName("RedisConnector")
+                .master(spark_master_url)
+                .config("spark.sql.legacy.timeParserPolicy", "LEGACY")
+            )
+            # Default memory for local mode
+            builder = builder.config("spark.driver.memory", "4g")
 
         self.spark = builder.getOrCreate()
-        logging.info("Spark session initialized.")
+        msg = "Spark session initialized and connected to "
+        msg += f"master: {spark_master_url}"
+        logging.info(msg)
+        msg1 = "Spark UI available "
+        msg1 += f"at: {self.spark.sparkContext.uiWebUrl}"
+        logging.info(msg1)
 
     async def connect(self) -> None:
         if not self._driver:
@@ -290,7 +326,9 @@ class Neo4jConnector(Connector):
         select_cols = [e.alias_or_name for e in ast.expressions]
         result_df = result_df.select(*select_cols)
 
+        logging.info("Spark job starting collection...")
         results = [row.asDict() for row in result_df.collect()]
+        logging.info("Spark job collection finished.")
         return [_camelize_keys(row) for row in results]
 
     async def aggregate(self, ast: exp.Select) -> List[Dict[str, Any]]:

@@ -284,10 +284,14 @@ class PolyClient:
                 raise ValueError(msg)
             target_backend = catalogue_backend
 
-        logging.info("polyclient-execute-use_catalogue", use_catalogue)
-        logging.info("polyclient-execute-ast", ast.find(exp.Table).name)
-        logging.info("polyclient-execute-query", sql)
-        logging.info("polyclient-execute-strategy", str(strategy.__class__))
+        logging.info(f"polyclient-execute-use_catalogue: {use_catalogue}")
+        logging.info(
+            f"polyclient-execute-ast: {ast.find(exp.Table).name}",
+        )
+        logging.info(f"polyclient-execute-query: {sql}")
+        logging.info(
+            f"polyclient-execute-strategy: {str(strategy.__class__)}",
+        )
         if not target_backend:
             # This case should now be unreachable due to the initial check
             raise ValueError("Could not determine target backend.")
