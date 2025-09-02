@@ -51,25 +51,21 @@ class RedisConnector(Connector):
         file for distribution to Spark workers. This is crucial for ensuring
         that libraries like 'redis' are available on all nodes.
         """
-        # Create the zip file in the project root for easy cleanup.
         project_root = Path(__file__).parent.parent.parent
         zip_path = project_root / "dependencies.zip"
         self._dependencies_zip = str(zip_path)
 
-        # No need to recreate the zip if it already exists.
         if zip_path.exists():
             logging.info(f"Dependency file already exists: {zip_path}")
             return
 
         logging.info(f"Creating dependencies zip file at: {zip_path}")
         try:
-            # Find the site-packages directory of the current virtual env
             venv_path = Path(sys.prefix)
             site_packages = next(venv_path.glob("**/site-packages"))
 
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
                 for file in site_packages.rglob("*"):
-                    # Create a relative path to maintain directory structure
                     arcname = file.relative_to(site_packages)
                     zf.write(file, arcname)
             logging.info("Successfully created dependencies.zip.")
@@ -78,38 +74,67 @@ class RedisConnector(Connector):
             self._dependencies_zip = None
 
     def _init_spark(self) -> Optional["SparkSession"]:
-        """Initializes and returns a local SparkSession
-        if PySpark is available."""
+        """
+        Initializes the SparkSession, ensuring it's configured with the
+        necessary dependencies for distributed execution. If an existing
+        session is found without the right configuration, it's restarted.
+        """
         if not SPARK_AVAILABLE:
-            msg = "PySpark not found. Complex queries like JOIN and "
-            msg += "GROUP BY will be slow and memory-intensive."
-            logging.warning(msg)
+            logging.warning("PySpark not found. Complex queries will be slow.")
             return None
         try:
-            spark_master_url = env(
-                "SPARK_MASTER_URL", "local[*]"
-            )  # Default to local mode
+            spark_master_url = env("SPARK_MASTER_URL", "local[*]")
 
+            if "local" not in spark_master_url:
+                self._prepare_dependencies()
+
+            # Stop the existing session if it's not configured correctly
+            active_session = SparkSession.getActiveSession()
+            if active_session:
+                py_files = active_session.sparkContext.getConf().get(
+                    "spark.submit.pyFiles", ""
+                )
+                is_correctly_configured = self._dependencies_zip and (
+                    self._dependencies_zip in py_files
+                )
+
+                if (
+                    "local" not in spark_master_url
+                    and not is_correctly_configured  # noqa:F501
+                ):  # noqa:F501
+                    logging.warning(
+                        "An active Spark session was found without "
+                        "the required "
+                        "Redis dependencies. Stopping it to apply new "
+                        "configurations."
+                    )
+                    active_session.stop()
+
+            # Build the Spark session
             builder = (
-                SparkSession.builder.appName("RedisConnector")
+                SparkSession.builder.appName("PolyFuseQL-Redis")
                 .master(spark_master_url)
                 .config("spark.sql.legacy.timeParserPolicy", "LEGACY")
             )
 
             if "local" not in spark_master_url:
-                # When running on a real cluster, package and send dependencies
-                self._prepare_dependencies()
                 if self._dependencies_zip:
-                    msg = "Attaching dependencies for remote Spark execution."
-                    logging.info(msg)
+                    logging.info("Attaching dependencies for Spark execution.")
                     builder = builder.config(
                         "spark.submit.pyFiles", self._dependencies_zip
                     )
-
+                # builder = builder.config("spark.driver.memory", "4g")
+                # builder = builder.config("spark.executor.memory", "3g")
+                builder = builder.config("spark.cores.max", "48")
                 builder = builder.config("spark.driver.memory", "4g")
                 builder = builder.config("spark.executor.memory", "3g")
+                builder = builder.config("spark.sql.shuffle.partitions", "144")
+                builder = builder.config("spark.network.timeout", "8000s")
+                builder = builder.config(
+                    "spark.executor.heartbeatInterval", "60s"
+                )  # noqa:F501
+
             else:
-                # Default memory for local mode
                 builder = builder.config("spark.driver.memory", "4g")
 
             spark_session = builder.getOrCreate()
@@ -139,7 +164,6 @@ class RedisConnector(Connector):
             self.spark.stop()
             self.spark = None
             logging.info("SparkSession stopped.")
-        # Clean up the created zip file on disconnect
         if self._dependencies_zip and os.path.exists(self._dependencies_zip):
             try:
                 os.remove(self._dependencies_zip)
@@ -151,9 +175,8 @@ class RedisConnector(Connector):
 
     def _get_client(self) -> aioredis.Redis:
         if not self._client:
-            raise ConnectionError(
-                "RedisConnector is not connected. Call connect() first."
-            )
+            msg = "RedisConnector is not connected. Call connect() first."
+            raise ConnectionError(msg)
         return self._client
 
     async def ping(self) -> bool:
@@ -247,25 +270,22 @@ class RedisConnector(Connector):
             "date": DateType(),
             "decimal": DecimalType(18, 4),
         }
-        fields = [
-            StructField(
-                col_name, type_mapping.get(col_type, StringType()), True
-            )  # noqa:F501
-            for col_name, col_type in zip(
-                schema_def["columns"], schema_def["types"]
-            )  # noqa:F501
-        ]
+        fields = []
+        for col_name, col_type in zip(
+            schema_def["columns"], schema_def["types"]
+        ):  # noqa:F501
+            spark_type = type_mapping.get(col_type, StringType())
+            fields.append(StructField(col_name, spark_type, True))
         return StructType(fields)
 
     def _translate_expression_to_spark(self, expression: exp.Expression):
         """Recursively translates a sqlglot expression to
         a PySpark Column expression."""
         if isinstance(expression, exp.Star):
-            return F.lit(1)  # For use in COUNT(*) -> F.count(F.lit(1))
+            return F.lit(1)
         if isinstance(expression, exp.Column):
             return F.col(expression.this.name)
         if isinstance(expression, exp.Literal):
-            # Ensure literals used in calculations are treated as Decimals
             try:
                 return F.lit(Decimal(expression.this))
             except InvalidOperation:
@@ -273,7 +293,6 @@ class RedisConnector(Connector):
         if isinstance(expression, exp.Paren):
             return self._translate_expression_to_spark(expression.this)
 
-        # Handle binary operations
         if isinstance(expression, exp.Binary):
             left = self._translate_expression_to_spark(expression.left)
             right = self._translate_expression_to_spark(expression.right)
@@ -286,14 +305,13 @@ class RedisConnector(Connector):
             if isinstance(expression, exp.LTE):
                 return left <= right
 
-        # Handle date casting e.g., date '1998-09-02'
         if (
             isinstance(expression, exp.Cast)
             and expression.to.this == exp.DataType.Type.DATE
         ):
             return F.to_date(F.lit(expression.this.this))
-        msg = "Unsupported SQL expression for "
-        msg += f"Spark translation: {type(expression)}"
+        msg = "Unsupported SQL expression for Spark "
+        msg += f"translation: {type(expression)}"
         raise NotImplementedError(msg)
 
     async def join(self, ast: exp.Select) -> List[Dict[str, Any]]:
@@ -303,12 +321,6 @@ class RedisConnector(Connector):
         raise NotImplementedError(msg)
 
     async def group_by(self, ast: exp.Select) -> List[Dict[str, Any]]:
-        """
-        Performs a GROUP BY operation using PySpark for efficiency.
-        This implementation is optimized to avoid pulling all data into the
-        driver's memory. It fetches keys from Redis and then uses Spark
-        workers to fetch the data in parallel, distributing the load.
-        """
         if self.spark is None:
             self.spark = self._init_spark()
         if not self.spark:
@@ -334,12 +346,6 @@ class RedisConnector(Connector):
         redis_password = self._password
 
         def fetch_redis_data_partitions(iterator):
-            """
-            Executed on each Spark worker to fetch a partition of data.
-            Uses a standard synchronous Redis client.
-            """
-            # This import must be inside the function to avoid serialization
-            # issues when sending this function to workers.
             import redis
 
             partition_keys = list(iterator)
@@ -363,9 +369,9 @@ class RedisConnector(Connector):
         data_rdd = keys_rdd.mapPartitions(fetch_redis_data_partitions)
 
         if data_rdd.isEmpty():
-            msg = "No data returned from Redis "
-            msg += "after parallel fetch."
-            logging.warning(msg)
+            logging.warning(
+                "No data returned from Redis after parallel fetch."
+            )  # noqa:F501
             return []
 
         df = data_rdd.toDF()
@@ -425,9 +431,8 @@ class RedisConnector(Connector):
                 elif isinstance(agg_func, exp.Count):
                     agg_expr = F.count(inner_expr).alias(alias)
                 else:
-                    raise NotImplementedError(
-                        f"Unsupported aggregate function: {type(agg_func)}"
-                    )
+                    msg = f"Unsupported aggregate function: {type(agg_func)}"
+                    raise NotImplementedError(msg)
                 agg_expressions.append(agg_expr)
 
         agg_df = grouped_df.agg(*agg_expressions)
@@ -435,9 +440,7 @@ class RedisConnector(Connector):
 
         order_by_clause = ast.args.get("order")
         if order_by_clause:
-            order_cols = [
-                col.this.this.name for col in order_by_clause.expressions
-            ]  # noqa:F501
+            order_cols = [col.this.name for col in order_by_clause.expressions]
             agg_df = agg_df.orderBy(*order_cols)
             logging.info(f"Applied ORDER BY on: {order_cols}")
 
@@ -474,11 +477,10 @@ class RedisConnector(Connector):
                 if isinstance(agg_func, exp.Sum):
                     result_row[alias] = sum(values)
                 elif isinstance(agg_func, exp.Avg):
-                    result_row[alias] = (
-                        sum(values) / Decimal(len(values))
-                        if values
-                        else Decimal("0.0")  # noqa:F501
-                    )
+                    if values:
+                        result_row[alias] = sum(values) / Decimal(len(values))
+                    else:
+                        result_row[alias] = Decimal("0.0")
 
         return [_camelize_keys(result_row)]
 
@@ -505,20 +507,20 @@ class RedisConnector(Connector):
                         batch.append(validated_data.model_dump())
                         inserted_count += 1
                     except ValidationError as e:
-                        logging.warning(
-                            f"Skipping malformed row: {row}. Error: {e}"
-                        )  # noqa:F501
+                        msg = f"Skipping malformed row: {row}. "
+                        msg += f"Error: {e}"
+                        logging.warning(msg)
         except FileNotFoundError:
             logging.error(f"File not found: {file_path}")
             return 0
 
         async with r.pipeline(transaction=False) as pipe:
             for payload in batch:
-                pk_val = (
-                    ":".join([str(payload[k]) for k in pk_info])
-                    if isinstance(pk_info, list)
-                    else payload[pk_info]
-                )
+                if isinstance(pk_info, list):
+                    pk_val = ":".join([str(payload[k]) for k in pk_info])
+                else:
+                    pk_val = payload[pk_info]
+
                 key = f"{table_name.capitalize()}:{pk_val}"
                 str_payload = {k: str(v) for k, v in payload.items()}
                 await pipe.hset(key, mapping=str_payload)
@@ -548,6 +550,5 @@ class RedisConnector(Connector):
             ) + self._evaluate_expression(expression.right, row_data)
         if isinstance(expression, exp.Paren):
             return self._evaluate_expression(expression.this, row_data)
-        raise NotImplementedError(
-            f"Unsupported expression: {type(expression)}"
-        )  # noqa:F501
+        msg = f"Unsupported expression: {type(expression)}"
+        raise NotImplementedError(msg)
