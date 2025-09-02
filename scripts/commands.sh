@@ -30,3 +30,6 @@ echo "Testing redis"
 redis-cli --scan --pattern 'Customer:*' | head
 echo "Testing neo4j"
 cypher-shell -u neo4j -p password 'MATCH (p:Product) RETURN count(p);'               # → 77
+
+
+ export PYSPARK_SUBMIT_ARGS="--jars FILEPATH_TO_JAR pyspark-shell"

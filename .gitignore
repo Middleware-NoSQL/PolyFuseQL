@@ -179,3 +179,4 @@ docker/**/init/*.redis
 /scripts/snapshot_20250518_212845.txt
 /snapshot_*_*.txt
 /docker/tpch-data/
+/jars/*.jars
