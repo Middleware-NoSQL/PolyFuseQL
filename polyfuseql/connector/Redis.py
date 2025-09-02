@@ -39,7 +39,9 @@ class RedisConnector(Connector):
         self._port = int(env("REDIS_PORT", "6379"))
         self._password = env("REDIS_PASSWORD", "tpch")
         self._client: Optional[aioredis.Redis] = None
-        self.spark: Optional["SparkSession"] = self._init_spark()
+        # FIX: Defer SparkSession creation until it's actually needed
+        # to avoid conflicts with other connectors during initialization.
+        self.spark: Optional["SparkSession"] = None
 
     def _init_spark(self) -> Optional["SparkSession"]:
         """Initializes and returns a local SparkSession
@@ -86,9 +88,11 @@ class RedisConnector(Connector):
                 # Default memory for local mode
                 builder = builder.config("spark.driver.memory", "4g")
 
-            self.spark = builder.getOrCreate()
+            # getOrCreate() ensures that we use the existing SparkSession
+            # if one has already been created by another connector.
+            spark_session = builder.getOrCreate()
             logging.info("Spark session initialized.")
-            return self.spark
+            return spark_session
 
         except PySparkException as e:
             logging.error(f"Failed to initialize SparkSession: {e}")
@@ -110,7 +114,11 @@ class RedisConnector(Connector):
             self._client = None
             logging.info("Redis connection closed.")
         if self.spark:
+            # Note: In a multi-connector setup, stopping the session here
+            # might affect other connectors. Ideally, the lifecycle
+            # should be managed by the main client application.
             self.spark.stop()
+            self.spark = None
             logging.info("SparkSession stopped.")
 
     def _get_client(self) -> aioredis.Redis:
@@ -267,6 +275,12 @@ class RedisConnector(Connector):
         raise NotImplementedError(msg)
 
     async def group_by(self, ast: exp.Select) -> List[Dict[str, Any]]:
+        # FIX: Lazily initialize Spark. This ensures we get the currently
+        # active SparkSession, rather than a potentially stale one that was
+        # stopped by another connector.
+        if self.spark is None:
+            self.spark = self._init_spark()
+
         if not self.spark:
             raise RuntimeError("PySpark is required for GROUP BY operations.")
 
