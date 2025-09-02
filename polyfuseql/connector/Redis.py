@@ -1,12 +1,14 @@
+# ruff: noqa E501
+
 import logging
 from typing import Dict, Any, Optional, List
 from polyfuseql.connector.Connector import Connector
 from polyfuseql.utils.utils import env, _camelize_keys, get_pydantic_model
 from polyfuseql.utils.tpch_schema import TPCH_SCHEMA
+import redis
 import redis.asyncio as aioredis
 from sqlglot import exp
 import csv
-from datetime import datetime
 from pydantic import ValidationError
 from decimal import Decimal, InvalidOperation
 
@@ -275,68 +277,113 @@ class RedisConnector(Connector):
         raise NotImplementedError(msg)
 
     async def group_by(self, ast: exp.Select) -> List[Dict[str, Any]]:
-        # FIX: Lazily initialize Spark. This ensures we get the currently
-        # active SparkSession, rather than a potentially stale one that was
-        # stopped by another connector.
+        """
+        Performs a GROUP BY operation using PySpark for efficiency.
+        This implementation is optimized to avoid pulling all data into the
+        driver's memory. It fetches keys from Redis and then uses Spark
+        workers to fetch the data in parallel, distributing the load.
+        """
         if self.spark is None:
             self.spark = self._init_spark()
-
         if not self.spark:
             raise RuntimeError("PySpark is required for GROUP BY operations.")
 
         table_name = ast.find(exp.Table).name
-        all_data = await self.get_all(table_name)
-        if not all_data:
+
+        # OPTIMIZATION: Instead of the driver pulling all data via get_all(),
+        # fetch only the keys and let Spark
+        # workers fetch hash data in parallel.
+        logging.info(f"Fetching keys for table '{table_name}' from Redis.")
+        r = self._get_client()
+        keys = await r.keys(f"{table_name.capitalize()}:*")
+        if not keys:
+            logging.warning(f"No keys found for table '{table_name}'.")
+            return []
+        logging.info(f"Found {len(keys)} keys. Distributing to Spark workers.")
+
+        # 1. Distribute keys into a Spark RDD for parallel processing.
+        # Increasing slices can improve parallelism for I/O bound tasks.
+        num_slices = self.spark.sparkContext.defaultParallelism * 4
+        keys_rdd = self.spark.sparkContext.parallelize(
+            keys, numSlices=num_slices
+        )  # noqa:F501
+
+        # 2. Define the function for workers to fetch data from Redis.
+        # This function runs on each partition of the RDD.
+        redis_host = self._host
+        redis_port = self._port
+        redis_password = self._password
+
+        def fetch_redis_data_partitions(iterator):
+            """
+            Executed on each Spark worker to fetch a partition of data.
+            Uses a standard synchronous Redis client.
+            """
+            partition_keys = list(iterator)
+            if not partition_keys:
+                return iter([])
+
+            # Each worker gets its own Redis client.
+            r_sync = redis.Redis(
+                host=redis_host,
+                port=redis_port,
+                password=redis_password,
+                decode_responses=True,
+            )
+            pipe = r_sync.pipeline(transaction=False)
+
+            for key in partition_keys:
+                pipe.hgetall(key)
+
+            # pipe.execute() returns a list of dictionaries (str -> str)
+            return iter(pipe.execute())
+
+        # 3. Execute the data fetching in parallel across the Spark cluster.
+        logging.info("Spark workers are now fetching data from Redis.")
+        data_rdd = keys_rdd.mapPartitions(fetch_redis_data_partitions)
+
+        # Check for empty results early to avoid creating an empty DataFrame.
+        if data_rdd.isEmpty():
+            msg = "No data returned from Redis after parallel fetch."
+            logging.warning(msg)
             return []
 
-        spark_schema = self._get_spark_schema(table_name)
-        if not spark_schema:
-            raise ValueError(f"No Spark schema for table {table_name}")
+        # 4. Create a DataFrame. Spark will infer a schema of all string types.
+        df = data_rdd.toDF()
 
-        # Pre-process data from Redis to match the schema types
-        date_cols = {
-            f.name
-            for f in spark_schema.fields
-            if isinstance(f.dataType, DateType)  # noqa:F501
-        }
-        int_cols = {
-            f.name
-            for f in spark_schema.fields
-            if isinstance(f.dataType, IntegerType)  # noqa:F501
-        }
-        decimal_cols = {
-            f.name
-            for f in spark_schema.fields
-            if isinstance(f.dataType, DecimalType)  # noqa:F501
-        }
-        for row in all_data:
-            for col in date_cols:
-                if row.get(col):
-                    row[col] = datetime.strptime(row[col], "%Y-%m-%d").date()
-            for col in int_cols:
-                if row.get(col):
-                    row[col] = int(row[col])
-            for col in decimal_cols:
-                if row.get(col):
-                    row[col] = Decimal(row[col])
+        # 5. Cast columns to their correct,
+        # final types using the defined schema.
+        # This is more efficient than pre-processing in Python on the driver.
+        target_spark_schema = self._get_spark_schema(table_name)
+        if not target_spark_schema:
+            raise ValueError(f"No Spark schema defined for table {table_name}")
 
-        df = self.spark.createDataFrame(all_data, schema=spark_schema)
+        for field in target_spark_schema.fields:
+            col_name = field.name
+            if col_name in df.columns:
+                df = df.withColumn(
+                    col_name, F.col(col_name).cast(field.dataType)
+                )  # noqa:F501
 
-        # 1. Apply WHERE clause
+        logging.info("Successfully created and typed Spark DataFrame.")
+
+        # 6. Apply WHERE clause
         where_clause = ast.args.get("where")
         if where_clause:
             filter_condition = self._translate_expression_to_spark(
                 where_clause.this
             )  # noqa:F501
             df = df.filter(filter_condition)
+            logging.info("Applied WHERE clause.")
 
-        # 2. Apply GROUP BY
+        # 7. Apply GROUP BY
         group_by_cols = [
             col.this.name for col in ast.args.get("group").expressions
         ]  # noqa:F501
         grouped_df = df.groupBy(*group_by_cols)
+        logging.info(f"Applied GROUP BY on: {group_by_cols}")
 
-        # 3. Build aggregation expressions
+        # 8. Build aggregation expressions
         agg_expressions = []
         final_select_cols = [e.alias_or_name for e in ast.expressions]
 
@@ -348,8 +395,6 @@ class RedisConnector(Connector):
                 alias = expression.alias_or_name
                 inner_expr = self._translate_expression_to_spark(agg_func.this)
 
-                # Define a high-precision decimal type for
-                # casting calculation results
                 high_precision_decimal = DecimalType(38, 6)
 
                 if isinstance(agg_func, exp.Sum):
@@ -373,19 +418,24 @@ class RedisConnector(Connector):
                 agg_expressions.append(agg_expr)
 
         agg_df = grouped_df.agg(*agg_expressions)
+        logging.info("Applied aggregations.")
 
-        # 4. Apply ORDER BY
+        # 9. Apply ORDER BY
         order_by_clause = ast.args.get("order")
         if order_by_clause:
             order_cols = [
                 col.this.this.name for col in order_by_clause.expressions
             ]  # noqa:F501
             agg_df = agg_df.orderBy(*order_cols)
+            logging.info(f"Applied ORDER BY on: {order_cols}")
 
-        # Ensure final column order matches the original query
+        # 10. Ensure final column order matches the original query
         final_df = agg_df.select(*final_select_cols)
 
+        logging.info("Spark job starting collection...")
         results = [row.asDict() for row in final_df.collect()]
+        logging.info(f"Spark job finished. Collected {len(results)} rows.")
+
         return [_camelize_keys(row) for row in results]
 
     async def aggregate(self, ast: exp.Select) -> List[Dict[str, Any]]:

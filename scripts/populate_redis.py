@@ -27,7 +27,7 @@ async def load_data_into_neo4j(client):
             await loader_connector.bulk_insert(table, str(filepath))
         else:
             raise FileNotFoundError(f"Data file not found: {filepath}")
-    print("Neo4j data loading complete.")
+    print("Redis data loading complete.")
 
 
 async def main():
