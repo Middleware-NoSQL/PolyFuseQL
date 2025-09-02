@@ -47,9 +47,9 @@ class RedisConnector(Connector):
 
     def _prepare_dependencies(self) -> None:
         """
-        Packages the project's virtual environment dependencies into a zip
-        file for distribution to Spark workers. This is crucial for ensuring
-        that libraries like 'redis' are available on all nodes.
+        Packages only the essential 'redis' library into a zip file for
+        distribution to Spark workers. This targeted approach avoids binary
+        incompatibilities from complex dependencies like cryptography.
         """
         project_root = Path(__file__).parent.parent.parent
         zip_path = project_root / "dependencies.zip"
@@ -59,16 +59,24 @@ class RedisConnector(Connector):
             logging.info(f"Dependency file already exists: {zip_path}")
             return
 
-        logging.info(f"Creating dependencies zip file at: {zip_path}")
+        logging.info(f"Creating targeted dependencies zip at: {zip_path}")
         try:
+            # Find the site-packages directory of the current virtual env
             venv_path = Path(sys.prefix)
             site_packages = next(venv_path.glob("**/site-packages"))
+            redis_lib_path = site_packages / "redis"
+
+            if not redis_lib_path.is_dir():
+                msg = "Could not find 'redis' library in site-packages. "
+                msg += "Please ensure it is installed in the venv."
+                raise FileNotFoundError(msg)
 
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                for file in site_packages.rglob("*"):
+                for file in redis_lib_path.rglob("*"):
+                    # Create a relative path to maintain the redis/* structure
                     arcname = file.relative_to(site_packages)
                     zf.write(file, arcname)
-            logging.info("Successfully created dependencies.zip.")
+            logging.info(f"Successfully zipped '{redis_lib_path}'.")
         except Exception as e:
             logging.error(f"Failed to create dependencies zip file: {e}")
             self._dependencies_zip = None
@@ -84,6 +92,7 @@ class RedisConnector(Connector):
             return None
         try:
             spark_master_url = env("SPARK_MASTER_URL", "local[*]")
+
             builder = (
                 SparkSession.builder.appName("PolyFuseQL-Connector")
                 .master(spark_master_url)
@@ -91,14 +100,8 @@ class RedisConnector(Connector):
             )
 
             if "local" not in spark_master_url:
-                builder = builder.config("spark.cores.max", "48")
                 builder = builder.config("spark.driver.memory", "4g")
                 builder = builder.config("spark.executor.memory", "3g")
-                builder = builder.config("spark.sql.shuffle.partitions", "144")
-                builder = builder.config("spark.network.timeout", "8000s")
-                builder = builder.config(
-                    "spark.executor.heartbeatInterval", "60s"
-                )  # noqa:F501
             else:
                 builder = builder.config("spark.driver.memory", "4g")
 
@@ -116,10 +119,11 @@ class RedisConnector(Connector):
                     # PYTHONPATH on all worker nodes.
                     spark_session.sparkContext.addPyFile(
                         self._dependencies_zip
-                    )  # noqa:F501
-                    msg = "Added dependency file to Python"
-                    msg += f" path on all workers: {self._dependencies_zip}"
-                    logging.info(msg)
+                    )  # noqa:E501
+                    logging.info(
+                        "Added dependency file to Python path on all workers: "
+                        f"{self._dependencies_zip}"
+                    )
 
             return spark_session
 
@@ -149,8 +153,8 @@ class RedisConnector(Connector):
         if self._dependencies_zip and os.path.exists(self._dependencies_zip):
             try:
                 os.remove(self._dependencies_zip)
-                msg = "Removed temporary dependencies file: "
-                msg += f"{self._dependencies_zip}"
+                msg = "Removed temporary dependencies "
+                msg += f"file: {self._dependencies_zip}"
                 logging.info(msg)
             except OSError as e:
                 logging.warning(f"Error removing dependencies file: {e}")
@@ -180,7 +184,7 @@ class RedisConnector(Connector):
 
     async def get(
         self, entity: str, pk_col: str, pk_val: Any
-    ) -> Dict[str, Any]:  # noqa:F501
+    ) -> Dict[str, Any]:  # noqa:E501
         r = self._get_client()
         key = f"{entity.capitalize()}:{pk_val}"
         raw_data = await r.hgetall(key)
@@ -239,7 +243,7 @@ class RedisConnector(Connector):
 
     async def query(
         self, sql: str, params: tuple = None
-    ) -> List[dict[str, Any]]:  # noqa:F501
+    ) -> List[dict[str, Any]]:  # noqa:E501
         msg = "RedisConnector does not support raw SQL queries."
         raise NotImplementedError(msg)
 
@@ -260,7 +264,7 @@ class RedisConnector(Connector):
             for col_name, col_type in zip(
                 schema_def["columns"], schema_def["types"]
             )  # noqa:F501
-        ]
+        ]  # noqa:E501
         return StructType(fields)
 
     def _translate_expression_to_spark(self, expression: exp.Expression):
@@ -276,10 +280,10 @@ class RedisConnector(Connector):
             except InvalidOperation:
                 return F.lit(expression.this)
         if isinstance(expression, exp.Paren):
-            return self._translate_expression_to_spark(expression.this)
+            return self._translate_expression_to_spark(expression.this)  # noqa:E501
 
         if isinstance(expression, exp.Binary):
-            left = self._translate_expression_to_spark(expression.left)
+            left = self._translate_expression_to_spark(expression.left)  # noqa:E501
             right = self._translate_expression_to_spark(expression.right)
             if isinstance(expression, exp.Mul):
                 return left * right
@@ -301,7 +305,9 @@ class RedisConnector(Connector):
 
     async def join(self, ast: exp.Select) -> List[Dict[str, Any]]:
         if not self.spark:
-            raise NotImplementedError("PySpark is not available for JOINs.")
+            raise NotImplementedError(
+                "PySpark is not available for JOINs."
+            )  # noqa:E501
         msg = "PySpark JOIN logic is not fully implemented yet."
         raise NotImplementedError(msg)
 
@@ -319,9 +325,11 @@ class RedisConnector(Connector):
         if not keys:
             logging.warning(f"No keys found for table '{table_name}'.")
             return []
-        logging.info(f"Found {len(keys)} keys. Distributing to Spark workers.")
+        logging.info(
+            f"Found {len(keys)} keys. " "Distributing to Spark workers."
+        )  # noqa:F501
 
-        num_slices = self.spark.sparkContext.defaultParallelism * 4
+        num_slices = self.spark.sparkContext.defaultParallelism * 4  # noqa:E501
         keys_rdd = self.spark.sparkContext.parallelize(
             keys, numSlices=num_slices
         )  # noqa:F501
@@ -354,7 +362,8 @@ class RedisConnector(Connector):
         data_rdd = keys_rdd.mapPartitions(fetch_redis_data_partitions)
 
         if data_rdd.isEmpty():
-            msg = "No data returned from Redis after parallel fetch."
+            msg = "No data returned from Redis "
+            msg += "after parallel fetch."
             logging.warning(msg)
             return []
 
@@ -362,14 +371,16 @@ class RedisConnector(Connector):
 
         target_spark_schema = self._get_spark_schema(table_name)
         if not target_spark_schema:
-            raise ValueError(f"No Spark schema defined for table {table_name}")
+            raise ValueError(
+                f"No Spark schema defined for table {table_name}"
+            )  # noqa:E501
 
         for field in target_spark_schema.fields:
             col_name = field.name
             if col_name in df.columns:
                 df = df.withColumn(
                     col_name, F.col(col_name).cast(field.dataType)
-                )  # noqa:F501
+                )  # noqa:E501
 
         logging.info("Successfully created and typed Spark DataFrame.")
 
@@ -377,7 +388,7 @@ class RedisConnector(Connector):
         if where_clause:
             filter_condition = self._translate_expression_to_spark(
                 where_clause.this
-            )  # noqa:F501
+            )  # noqa:E501
             df = df.filter(filter_condition)
             logging.info("Applied WHERE clause.")
 
@@ -388,7 +399,7 @@ class RedisConnector(Connector):
         logging.info(f"Applied GROUP BY on: {group_by_cols}")
 
         agg_expressions = []
-        final_select_cols = [e.alias_or_name for e in ast.expressions]
+        final_select_cols = [e.alias_or_name for e in ast.expressions]  # noqa:E501
 
         for expression in ast.expressions:
             if isinstance(expression, exp.Alias) and isinstance(
@@ -396,7 +407,9 @@ class RedisConnector(Connector):
             ):
                 agg_func = expression.this
                 alias = expression.alias_or_name
-                inner_expr = self._translate_expression_to_spark(agg_func.this)
+                inner_expr = self._translate_expression_to_spark(
+                    agg_func.this
+                )  # noqa:E501
 
                 high_precision_decimal = DecimalType(38, 6)
 
@@ -425,14 +438,16 @@ class RedisConnector(Connector):
 
         order_by_clause = ast.args.get("order")
         if order_by_clause:
-            order_cols = [col.this.name for col in order_by_clause.expressions]
+            order_cols = [
+                col.this.name for col in order_by_clause.expressions
+            ]  # noqa:E501
             agg_df = agg_df.orderBy(*order_cols)
             logging.info(f"Applied ORDER BY on: {order_cols}")
 
         final_df = agg_df.select(*final_select_cols)
 
         logging.info("Spark job starting collection...")
-        results = [row.asDict() for row in final_df.collect()]
+        results = [row.asDict() for row in final_df.collect()]  # noqa:E501
         logging.info(f"Spark job finished. Collected {len(results)} rows.")
 
         return [_camelize_keys(row) for row in results]
@@ -466,7 +481,7 @@ class RedisConnector(Connector):
                         sum(values) / Decimal(len(values))
                         if values
                         else Decimal("0.0")  # noqa:F501
-                    )
+                    )  # noqa:E501
 
         return [_camelize_keys(result_row)]
 
@@ -538,4 +553,4 @@ class RedisConnector(Connector):
             return self._evaluate_expression(expression.this, row_data)
         raise NotImplementedError(
             f"Unsupported expression: {type(expression)}"
-        )  # noqa:F501
+        )  # noqa:E501
