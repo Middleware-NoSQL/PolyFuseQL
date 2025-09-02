@@ -1,3 +1,5 @@
+# ruff: noqa
+
 import csv
 import logging
 import os
@@ -26,7 +28,9 @@ from pyspark.sql.types import (
 from sqlglot import exp
 
 
-async def _execute_batch_insert(tx: AsyncTransaction, query: str, rows: List[Dict]) -> int:
+async def _execute_batch_insert(
+    tx: AsyncTransaction, query: str, rows: List[Dict]
+) -> int:
     """
     Helper function to execute a batch insert within a managed transaction.
     This function is passed to session.execute_write.
@@ -55,9 +59,9 @@ class Neo4jConnector(Connector):
 
         active_session = SparkSession.getActiveSession()
         if active_session:
-            logging.warning(
-                "An existing Spark session was found. Stopping it to apply new configurations."
-            )
+            msg = "An existing Spark session was found. "
+            msg += "Stopping it to apply new configurations."
+            logging.warning(msg)
             active_session.stop()
 
         host = env("NEO4J_HOST", "localhost")
@@ -69,26 +73,34 @@ class Neo4jConnector(Connector):
         self._driver: Optional[AsyncDriver] = None
 
         spark_master_url = "local[*]"
-        #spark_master_url = "spark://cuscungo:7077"
+        # spark_master_url = "spark://cuscungo:7077"
 
         jar_path_str = os.environ.get(
             "NEO4J_SPARK_JAR_PATH",
-            str(Path(__file__).parent.parent.parent / "jars" / "neo4j-spark-connector-5.3.1-s_2.13.jar")
+            str(
+                Path(__file__).parent.parent.parent
+                / "jars"
+                / "neo4j-spark-connector-5.3.1-s_2.13.jar"
+            ),
         )
 
         jar_path = Path(jar_path_str)
         if not jar_path.exists():
-            raise FileNotFoundError(
-                f"Neo4j Spark connector JAR not found at: {jar_path}\n"
-                "Please download it from Maven Central and place it in the 'jars' directory."
-            )
+            msg = f"Neo4j Spark connector JAR not found at: {jar_path}\n "
+            msg += "Please download it from Maven Central "
+            msg += "and place it in the 'jars' directory."  # noqa:F501
+            raise FileNotFoundError()
         logging.info(f"Found local JAR: {jar_path_str}")
 
-        os.environ['PYSPARK_SUBMIT_ARGS'] = f'--jars "{jar_path_str}" pyspark-shell'
+        os.environ["PYSPARK_SUBMIT_ARGS"] = (
+            f'--jars "{jar_path_str}" pyspark-shell'  # noqa:F501
+        )
 
         if "local" not in spark_master_url:
             builder = (
-                SparkSession.builder.appName("Neo4jConnector-TPCH-Benchmark-Server")
+                SparkSession.builder.appName(
+                    "Neo4jConnector-TPCH-Benchmark-Server"
+                )  # noqa:F501
                 .master(spark_master_url)
                 .config("spark.cores.max", "48")
                 .config("spark.driver.memory", "4g")
@@ -99,14 +111,19 @@ class Neo4jConnector(Connector):
             )
         else:
             builder = (
-                SparkSession.builder.appName("Neo4jConnector-TPCH-Benchmark-Local")
+                SparkSession.builder.appName(
+                    "Neo4jConnector-TPCH-Benchmark-Local"
+                )  # noqa:F501
                 .master(spark_master_url)
                 .config("spark.driver.memory", "4g")
             )
 
         self.spark = builder.getOrCreate()
-        logging.info(f"Spark session initialized and connected to master: {self.spark.sparkContext.master}")
-        logging.info(f"Spark UI available at: {self.spark.sparkContext.uiWebUrl}")
+        msg = f"Spark session initialized and connected to master: {self.spark.sparkContext.master}"  # noqa:E501
+        logging.info(msg)
+        logging.info(
+            f"Spark UI available at: {self.spark.sparkContext.uiWebUrl}"
+        )  # noqa:F501
 
     async def connect(self) -> None:
         if not self._driver:
@@ -147,16 +164,16 @@ class Neo4jConnector(Connector):
             return rec["n"] if rec else 0
 
     async def get(
-            self, entity: str, pk_col: str, pk_val: Any
-    ) -> Dict[str, Any]:
+        self, entity: str, pk_col: str, pk_val: Any
+    ) -> Dict[str, Any]:  # noqa:F501
         driver = self._get_driver()
         async with driver.session() as s:
             cypher_match = f"MATCH (n:{entity.capitalize()}) "
             cypher_where = f"WHERE n.`{pk_col}` "
             cypher = (
-                    cypher_match
-                    + cypher_where
-                    + "= $pk_val RETURN properties(n) AS p LIMIT 1"
+                cypher_match
+                + cypher_where
+                + "= $pk_val RETURN properties(n) AS p LIMIT 1"
             )
             result = await s.run(cypher, pk_val=pk_val)
             rec = await result.single()
@@ -174,7 +191,7 @@ class Neo4jConnector(Connector):
             return rec["p"] if rec else {}
 
     async def update(
-            self, entity: str, pk_col: str, pk_val: Any, payload: Dict[str, Any]
+        self, entity: str, pk_col: str, pk_val: Any, payload: Dict[str, Any]
     ) -> int:
         driver = self._get_driver()
         async with driver.session() as s:
@@ -197,10 +214,10 @@ class Neo4jConnector(Connector):
             return summary.counters.nodes_deleted
 
     async def get_all(
-            self,
-            entity: str,
-            where_clause: Optional[str] = None,
-            params: Optional[Dict] = None,
+        self,
+        entity: str,
+        where_clause: Optional[str] = None,
+        params: Optional[Dict] = None,
     ) -> List[Dict[str, Any]]:
         driver = self._get_driver()
         cypher_query = f"MATCH (n:{entity.capitalize()}) "
@@ -219,13 +236,15 @@ class Neo4jConnector(Connector):
         raise NotImplementedError(msg)
 
     async def query(
-            self, sql: str, params: Optional[tuple] = None
+        self, sql: str, params: Optional[tuple] = None
     ) -> List[Dict[str, Any]]:
         raise NotImplementedError(
             "Neo4jConnector expects Cypher, not SQL, for generic queries."
         )
 
-    def _translate_where_to_cypher_literal(self, where_expr: exp.Expression) -> str:
+    def _translate_where_to_cypher_literal(
+        self, where_expr: exp.Expression
+    ) -> str:  # noqa:F501
         if isinstance(where_expr, exp.LTE):
             col_name = where_expr.left.sql()
             is_cast = isinstance(where_expr.right, exp.Cast)
@@ -241,15 +260,20 @@ class Neo4jConnector(Connector):
         label = table_name.capitalize()
         spark_schema = self._get_spark_schema(table_name)
 
-        # Schema for reading from Neo4j: Use DoubleType for all decimal-like fields.
+        # Schema for reading from Neo4j: Use
+        # DoubleType for all decimal-like fields.
         read_schema_fields = []
         # Cypher expressions: Force cast to float at the source.
         return_expressions = []
 
         for field in spark_schema.fields:
             if isinstance(field.dataType, (DecimalType, DoubleType)):
-                read_schema_fields.append(StructField(field.name, DoubleType(), True))
-                return_expressions.append(f"toFloat(n.{field.name}) AS {field.name}")
+                read_schema_fields.append(
+                    StructField(field.name, DoubleType(), True)
+                )  # noqa:F501
+                return_expressions.append(
+                    f"toFloat(n.{field.name}) AS {field.name}"
+                )  # noqa:F501
             else:
                 read_schema_fields.append(field)
                 return_expressions.append(f"n.{field.name} AS {field.name}")
@@ -258,11 +282,15 @@ class Neo4jConnector(Connector):
         cypher_query = f"MATCH (n:{label}) "
         if ast.args.get("where"):
             where_this = ast.args["where"].this
-            cypher_where_clause = self._translate_where_to_cypher_literal(where_this)
+            cypher_where_clause = self._translate_where_to_cypher_literal(
+                where_this
+            )  # noqa:F501
             cypher_query += cypher_where_clause
         cypher_query += f" RETURN {', '.join(return_expressions)}"
 
-        logging.info(f"Using Spark connector with Cypher query: {cypher_query}")
+        logging.info(
+            f"Using Spark connector with Cypher query: {cypher_query}"
+        )  # noqa:F501
 
         df = (
             self.spark.read.format("org.neo4j.spark.DataSource")
@@ -275,10 +303,13 @@ class Neo4jConnector(Connector):
             .load()
         )
 
-        # After loading safely as doubles, cast to the target high-precision DecimalType.
+        # After loading safely as doubles,
+        # cast to the target high-precision DecimalType.
         for field in spark_schema.fields:
             if isinstance(field.dataType, DecimalType):
-                df = df.withColumn(field.name, F.col(field.name).cast(field.dataType))
+                df = df.withColumn(
+                    field.name, F.col(field.name).cast(field.dataType)
+                )  # noqa:F501
 
         if df.isEmpty():
             return []
@@ -292,9 +323,13 @@ class Neo4jConnector(Connector):
                 continue
             if isinstance(expr, exp.Alias):
                 agg_func = expr.this
-                spark_col_expr = self._translate_expression_to_spark(agg_func.this)
+                spark_col_expr = self._translate_expression_to_spark(
+                    agg_func.this
+                )  # noqa:F501
                 if isinstance(agg_func, exp.Count):
-                    agg_expressions.append(F.count(spark_col_expr).alias(alias))
+                    agg_expressions.append(
+                        F.count(spark_col_expr).alias(alias)
+                    )  # noqa:F501
                 elif isinstance(agg_func, exp.Sum):
                     agg_expressions.append(F.sum(spark_col_expr).alias(alias))
                 elif isinstance(agg_func, exp.Avg):
@@ -328,14 +363,18 @@ class Neo4jConnector(Connector):
         return_expressions = []
         for field in spark_schema.fields:
             if isinstance(field.dataType, (DecimalType, DoubleType)):
-                read_schema_fields.append(StructField(field.name, DoubleType(), True))
-                return_expressions.append(f"toFloat(n.{field.name}) AS {field.name}")
+                read_schema_fields.append(
+                    StructField(field.name, DoubleType(), True)
+                )  # noqa:F501
+                return_expressions.append(
+                    f"toFloat(n.{field.name}) AS {field.name}"
+                )  # noqa:F501
             else:
                 read_schema_fields.append(field)
                 return_expressions.append(f"n.{field.name} AS {field.name}")
         read_schema = StructType(read_schema_fields)
-
-        cypher_query = f"MATCH (n:{label}) RETURN {', '.join(return_expressions)}"
+        msg = f"MATCH (n:{label}) RETURN {', '.join(return_expressions)}"
+        cypher_query = msg
 
         df = (
             self.spark.read.format("org.neo4j.spark.DataSource")
@@ -350,7 +389,9 @@ class Neo4jConnector(Connector):
 
         for field in spark_schema.fields:
             if isinstance(field.dataType, DecimalType):
-                df = df.withColumn(field.name, F.col(field.name).cast(field.dataType))
+                df = df.withColumn(
+                    field.name, F.col(field.name).cast(field.dataType)
+                )  # noqa:F501
 
         if df.isEmpty():
             alias = ast.expressions[0].alias_or_name
@@ -362,15 +403,21 @@ class Neo4jConnector(Connector):
             alias = expr.alias_or_name
             core_expr = expr.this if isinstance(expr, exp.Alias) else expr
             if isinstance(core_expr, exp.AggFunc):
-                spark_col_expr = self._translate_expression_to_spark(core_expr.this)
+                spark_col_expr = self._translate_expression_to_spark(
+                    core_expr.this
+                )  # noqa:F501
                 if isinstance(core_expr, exp.Count):
-                    agg_expressions.append(F.count(spark_col_expr).alias(alias))
+                    agg_expressions.append(
+                        F.count(spark_col_expr).alias(alias)
+                    )  # noqa:F501
                 elif isinstance(core_expr, exp.Sum):
                     agg_expressions.append(F.sum(spark_col_expr).alias(alias))
                 elif isinstance(core_expr, exp.Avg):
                     agg_expressions.append(F.avg(spark_col_expr).alias(alias))
             else:
-                raise NotImplementedError(f"Unsupported expression in aggregate: {expr.sql()}")
+                raise NotImplementedError(
+                    f"Unsupported expression in aggregate: {expr.sql()}"
+                )
 
         result_df = df.agg(*agg_expressions)
         results = [row.asDict() for row in result_df.collect()]
@@ -378,7 +425,7 @@ class Neo4jConnector(Connector):
         return [_camelize_keys(row) for row in results]
 
     async def bulk_insert(
-            self, table_name: str, file_path: str, batch_size: int = 5000
+        self, table_name: str, file_path: str, batch_size: int = 5000
     ) -> int:
         driver = self._get_driver()
         schema = TPCH_SCHEMA.get(table_name.lower())
@@ -389,7 +436,9 @@ class Neo4jConnector(Connector):
                     "types": ["str", "decimal", "date"],
                 }
             else:
-                raise ValueError(f"No schema definition found for table: {table_name}")
+                raise ValueError(
+                    f"No schema definition found for table: {table_name}"
+                )  # noqa:F501
 
         cols = schema["columns"]
         label = table_name.capitalize()
@@ -421,14 +470,19 @@ class Neo4jConnector(Connector):
                         # Convert Python types to Neo4j-compatible types
                         for key, value in model_dict.items():
                             if isinstance(value, date):
-                                model_dict[key] = neo_time.Date.from_native(value)
-                            # Pydantic may convert to Decimal, ensure it's a float for Neo4j driver
+                                model_dict[key] = neo_time.Date.from_native(
+                                    value
+                                )  # noqa:F501
+                            # Pydantic may convert to Decimal, ensure it's a
+                            # float for Neo4j driver  # noqa:F501
                             if isinstance(value, Decimal):
                                 model_dict[key] = float(value)
 
                         batch.append(model_dict)
                     except ValidationError as e:
-                        logging.warning(f"Skipping row due to validation error: {line}. Error: {e}")
+                        msg = "Skipping row due to validation "
+                        msg += f"error: {line}. Error: {e}"  # noqa:F501
+                        logging.warning(msg)
                         continue
 
                     if len(batch) >= batch_size:
@@ -464,7 +518,9 @@ class Neo4jConnector(Connector):
                         StructField("sale_date", DateType(), True),
                     ]
                 )
-            raise ValueError(f"No schema definition found for table: {table_name}")
+            raise ValueError(
+                f"No schema definition found for table: {table_name}"
+            )  # noqa:F501
         fields = []
         for c_name, c_type in zip(sch_def["columns"], sch_def["types"]):
             if c_type == "date":
@@ -501,7 +557,9 @@ class Neo4jConnector(Connector):
             return left <= right
         if isinstance(expr, exp.Paren):
             return self._translate_expression_to_spark(expr.this)
-        if isinstance(expr, exp.Cast) and expr.to.this == exp.DataType.Type.DATE:
+        if (
+            isinstance(expr, exp.Cast)
+            and expr.to.this == exp.DataType.Type.DATE  # noqa:F501
+        ):  # noqa:F501
             return F.to_date(self._translate_expression_to_spark(expr.this))
         raise NotImplementedError(f"Unsupported expression type: {type(expr)}")
-
