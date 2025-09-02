@@ -1,6 +1,7 @@
 # ruff: disable=F501
 import decimal
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -64,15 +65,16 @@ async def poly_client():
 
 
 @pytest.mark.asyncio
-async def test_tpch_query1_neo4j_fast(poly_client, ground_truth_from_file):
+@pytest.mark.parametrize("engine", ["postgres", "redis", "neo4j"])
+async def test_tpch_query1_fast(engine, poly_client, ground_truth_from_file):
     """
     Tests TPC-H Query 1 against Neo4j by comparing its result to the
     pre-computed ground truth from a file.
     """
     # Step 1: Execute the query on Neo4j (assumes data is already loaded).
-    print("\nExecuting query on Neo4j...")
-    results = await poly_client.execute(TPCH_QUERY_1, engine="neo4j")
-    print("Query executed on Neo4j.")
+    logging.info(f"Executing query on {engine}...")
+    results = await poly_client.execute(TPCH_QUERY_1, engine=engine)
+    print(f"Query executed on {engine}.")
 
     # Step 2: Round and sort the actual results from Neo4j.
     rounded_res = round_results(results)
@@ -81,5 +83,5 @@ async def test_tpch_query1_neo4j_fast(poly_client, ground_truth_from_file):
     # Step 3: Compare the Neo4j result with the loaded ground truth.
     assert (
         rounded_res == ground_truth_from_file
-    ), "Results for Neo4j do not match the pre-computed ground truth."
-    print("Assertion successful: Neo4j results match ground truth.")
+    ), f"Results for {engine} do not match the pre-computed ground truth."
+    logging.info(f"Assertion successful: {engine} results match ground truth.")
