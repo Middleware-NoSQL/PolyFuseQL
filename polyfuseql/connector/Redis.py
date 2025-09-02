@@ -84,7 +84,6 @@ class RedisConnector(Connector):
             return None
         try:
             spark_master_url = env("SPARK_MASTER_URL", "local[*]")
-
             builder = (
                 SparkSession.builder.appName("PolyFuseQL-Connector")
                 .master(spark_master_url)
@@ -92,8 +91,14 @@ class RedisConnector(Connector):
             )
 
             if "local" not in spark_master_url:
+                builder = builder.config("spark.cores.max", "48")
                 builder = builder.config("spark.driver.memory", "4g")
                 builder = builder.config("spark.executor.memory", "3g")
+                builder = builder.config("spark.sql.shuffle.partitions", "144")
+                builder = builder.config("spark.network.timeout", "8000s")
+                builder = builder.config(
+                    "spark.executor.heartbeatInterval", "60s"
+                )  # noqa:F501
             else:
                 builder = builder.config("spark.driver.memory", "4g")
 
