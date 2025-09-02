@@ -1,11 +1,12 @@
-# ruff: noqa E501
-
 import logging
+import os
+import sys
+import zipfile
+from pathlib import Path
 from typing import Dict, Any, Optional, List
 from polyfuseql.connector.Connector import Connector
 from polyfuseql.utils.utils import env, _camelize_keys, get_pydantic_model
 from polyfuseql.utils.tpch_schema import TPCH_SCHEMA
-import redis
 import redis.asyncio as aioredis
 from sqlglot import exp
 import csv
@@ -41,9 +42,40 @@ class RedisConnector(Connector):
         self._port = int(env("REDIS_PORT", "6379"))
         self._password = env("REDIS_PASSWORD", "tpch")
         self._client: Optional[aioredis.Redis] = None
-        # FIX: Defer SparkSession creation until it's actually needed
-        # to avoid conflicts with other connectors during initialization.
         self.spark: Optional["SparkSession"] = None
+        self._dependencies_zip: Optional[str] = None
+
+    def _prepare_dependencies(self) -> None:
+        """
+        Packages the project's virtual environment dependencies into a zip
+        file for distribution to Spark workers. This is crucial for ensuring
+        that libraries like 'redis' are available on all nodes.
+        """
+        # Create the zip file in the project root for easy cleanup.
+        project_root = Path(__file__).parent.parent.parent
+        zip_path = project_root / "dependencies.zip"
+        self._dependencies_zip = str(zip_path)
+
+        # No need to recreate the zip if it already exists.
+        if zip_path.exists():
+            logging.info(f"Dependency file already exists: {zip_path}")
+            return
+
+        logging.info(f"Creating dependencies zip file at: {zip_path}")
+        try:
+            # Find the site-packages directory of the current virtual env
+            venv_path = Path(sys.prefix)
+            site_packages = next(venv_path.glob("**/site-packages"))
+
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for file in site_packages.rglob("*"):
+                    # Create a relative path to maintain directory structure
+                    arcname = file.relative_to(site_packages)
+                    zf.write(file, arcname)
+            logging.info("Successfully created dependencies.zip.")
+        except Exception as e:
+            logging.error(f"Failed to create dependencies zip file: {e}")
+            self._dependencies_zip = None
 
     def _init_spark(self) -> Optional["SparkSession"]:
         """Initializes and returns a local SparkSession
@@ -54,15 +86,9 @@ class RedisConnector(Connector):
             logging.warning(msg)
             return None
         try:
-            # --- Spark Session Configuration ---
-            # To use workers, you must run a Spark Standalone cluster.
-            # 1. Start Master: ./sbin/start-master.sh
-            # 2. Start Worker: ./sbin/start-worker.sh spark://<your-ip>:7077
-            # The master URL will be printed when you start the master.
-            spark_master_url = "local[*]"  # Default to local mode
-            # spark_master_url = "spark://cuscungo:7077"
-            # spark_master_url = "spark://<your-ip>:7077"
-            # Example for standalone cluster
+            spark_master_url = env(
+                "SPARK_MASTER_URL", "local[*]"
+            )  # Default to local mode
 
             builder = (
                 SparkSession.builder.appName("RedisConnector")
@@ -71,27 +97,21 @@ class RedisConnector(Connector):
             )
 
             if "local" not in spark_master_url:
-                # --- Configuration for a Normal PC ---
-                # Use a portion of resources to keep the system responsive.
-                builder = builder.config("spark.driver.memory", "2g")
-                builder = builder.config("spark.executor.cores", "8")
-                builder = builder.config("spark.executor.memory", "4g")
+                # When running on a real cluster, package and send dependencies
+                self._prepare_dependencies()
+                if self._dependencies_zip:
+                    msg = "Attaching dependencies for remote Spark execution."
+                    logging.info(msg)
+                    builder = builder.config(
+                        "spark.submit.pyFiles", self._dependencies_zip
+                    )
 
-                # --- Configuration for a High-Memory Server ---
-                # Uncomment below to configure for
-                # a server with more resources.
-                # builder = builder.config("spark.driver.memory", "8g")
-                # builder = builder.config("spark.executor.instances", "6")
-                # builder = builder.config("spark.executor.cores", "5")
-                # builder = builder.config("spark.executor.memory", "15g")
-                # builder = builder
-                #   .config("spark.sql.shuffle.partitions", "200")
+                builder = builder.config("spark.driver.memory", "4g")
+                builder = builder.config("spark.executor.memory", "3g")
             else:
                 # Default memory for local mode
                 builder = builder.config("spark.driver.memory", "4g")
 
-            # getOrCreate() ensures that we use the existing SparkSession
-            # if one has already been created by another connector.
             spark_session = builder.getOrCreate()
             logging.info("Spark session initialized.")
             return spark_session
@@ -116,12 +136,18 @@ class RedisConnector(Connector):
             self._client = None
             logging.info("Redis connection closed.")
         if self.spark:
-            # Note: In a multi-connector setup, stopping the session here
-            # might affect other connectors. Ideally, the lifecycle
-            # should be managed by the main client application.
             self.spark.stop()
             self.spark = None
             logging.info("SparkSession stopped.")
+        # Clean up the created zip file on disconnect
+        if self._dependencies_zip and os.path.exists(self._dependencies_zip):
+            try:
+                os.remove(self._dependencies_zip)
+                msg = "Removed temporary dependencies "
+                msg += f"file: {self._dependencies_zip}"
+                logging.info(msg)
+            except OSError as e:
+                logging.warning(f"Error removing dependencies file: {e}")
 
     def _get_client(self) -> aioredis.Redis:
         if not self._client:
@@ -151,7 +177,7 @@ class RedisConnector(Connector):
     ) -> Dict[str, Any]:  # noqa:F501
         r = self._get_client()
         key = f"{entity.capitalize()}:{pk_val}"
-        raw_data = await r.hgetall(key)  # Assuming HASH for simplicity
+        raw_data = await r.hgetall(key)
         if not raw_data:
             return {}
 
@@ -290,9 +316,6 @@ class RedisConnector(Connector):
 
         table_name = ast.find(exp.Table).name
 
-        # OPTIMIZATION: Instead of the driver pulling all data via get_all(),
-        # fetch only the keys and let Spark
-        # workers fetch hash data in parallel.
         logging.info(f"Fetching keys for table '{table_name}' from Redis.")
         r = self._get_client()
         keys = await r.keys(f"{table_name.capitalize()}:*")
@@ -301,15 +324,11 @@ class RedisConnector(Connector):
             return []
         logging.info(f"Found {len(keys)} keys. Distributing to Spark workers.")
 
-        # 1. Distribute keys into a Spark RDD for parallel processing.
-        # Increasing slices can improve parallelism for I/O bound tasks.
         num_slices = self.spark.sparkContext.defaultParallelism * 4
         keys_rdd = self.spark.sparkContext.parallelize(
             keys, numSlices=num_slices
         )  # noqa:F501
 
-        # 2. Define the function for workers to fetch data from Redis.
-        # This function runs on each partition of the RDD.
         redis_host = self._host
         redis_port = self._port
         redis_password = self._password
@@ -319,11 +338,14 @@ class RedisConnector(Connector):
             Executed on each Spark worker to fetch a partition of data.
             Uses a standard synchronous Redis client.
             """
+            # This import must be inside the function to avoid serialization
+            # issues when sending this function to workers.
+            import redis
+
             partition_keys = list(iterator)
             if not partition_keys:
                 return iter([])
 
-            # Each worker gets its own Redis client.
             r_sync = redis.Redis(
                 host=redis_host,
                 port=redis_port,
@@ -335,25 +357,19 @@ class RedisConnector(Connector):
             for key in partition_keys:
                 pipe.hgetall(key)
 
-            # pipe.execute() returns a list of dictionaries (str -> str)
             return iter(pipe.execute())
 
-        # 3. Execute the data fetching in parallel across the Spark cluster.
         logging.info("Spark workers are now fetching data from Redis.")
         data_rdd = keys_rdd.mapPartitions(fetch_redis_data_partitions)
 
-        # Check for empty results early to avoid creating an empty DataFrame.
         if data_rdd.isEmpty():
-            msg = "No data returned from Redis after parallel fetch."
+            msg = "No data returned from Redis "
+            msg += "after parallel fetch."
             logging.warning(msg)
             return []
 
-        # 4. Create a DataFrame. Spark will infer a schema of all string types.
         df = data_rdd.toDF()
 
-        # 5. Cast columns to their correct,
-        # final types using the defined schema.
-        # This is more efficient than pre-processing in Python on the driver.
         target_spark_schema = self._get_spark_schema(table_name)
         if not target_spark_schema:
             raise ValueError(f"No Spark schema defined for table {table_name}")
@@ -367,7 +383,6 @@ class RedisConnector(Connector):
 
         logging.info("Successfully created and typed Spark DataFrame.")
 
-        # 6. Apply WHERE clause
         where_clause = ast.args.get("where")
         if where_clause:
             filter_condition = self._translate_expression_to_spark(
@@ -376,14 +391,12 @@ class RedisConnector(Connector):
             df = df.filter(filter_condition)
             logging.info("Applied WHERE clause.")
 
-        # 7. Apply GROUP BY
         group_by_cols = [
             col.this.name for col in ast.args.get("group").expressions
         ]  # noqa:F501
         grouped_df = df.groupBy(*group_by_cols)
         logging.info(f"Applied GROUP BY on: {group_by_cols}")
 
-        # 8. Build aggregation expressions
         agg_expressions = []
         final_select_cols = [e.alias_or_name for e in ast.expressions]
 
@@ -420,7 +433,6 @@ class RedisConnector(Connector):
         agg_df = grouped_df.agg(*agg_expressions)
         logging.info("Applied aggregations.")
 
-        # 9. Apply ORDER BY
         order_by_clause = ast.args.get("order")
         if order_by_clause:
             order_cols = [
@@ -429,7 +441,6 @@ class RedisConnector(Connector):
             agg_df = agg_df.orderBy(*order_cols)
             logging.info(f"Applied ORDER BY on: {order_cols}")
 
-        # 10. Ensure final column order matches the original query
         final_df = agg_df.select(*final_select_cols)
 
         logging.info("Spark job starting collection...")
