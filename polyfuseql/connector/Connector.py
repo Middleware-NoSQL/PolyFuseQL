@@ -2,10 +2,17 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, List
 from sqlglot import exp
 
+from polyfuseql.catalogue.Catalogue import Catalogue
+
 
 class Connector(ABC):
-    def __init__(self, options: Optional[Dict] = None) -> None:
+    def __init__(
+        self,
+        options: Optional[Dict] = None,
+        catalogue: Optional[Catalogue] = None,
+    ) -> None:
         self._options = options or {}
+        self.catalogue = catalogue or Catalogue()
 
     @abstractmethod
     async def connect(self):
@@ -28,7 +35,7 @@ class Connector(ABC):
     @abstractmethod
     async def get(
         self, entity: str, pk_col: str, pk_val: Any
-    ) -> Dict[str, Any]:  # noqa: F501
+    ) -> Dict[str, Any]:  # noqa:F501
         pass
 
     @abstractmethod
@@ -38,7 +45,7 @@ class Connector(ABC):
     @abstractmethod
     async def update(
         self, entity: str, pk_col: str, pk_val: Any, payload: Dict[str, Any]
-    ) -> int:  # noqa: F501
+    ) -> int:
         """Update a record by its primary key and
         return the count of updated records."""
         pass
@@ -63,7 +70,7 @@ class Connector(ABC):
     @abstractmethod
     async def query(
         self, sql: str, params: tuple = None
-    ) -> List[dict[str, Any]]:  # noqa: F501
+    ) -> List[dict[str, Any]]:  # noqa:F501
         """Executes a raw SQL-like query."""
         pass
 

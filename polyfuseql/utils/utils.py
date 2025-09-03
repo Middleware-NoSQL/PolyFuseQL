@@ -1,10 +1,9 @@
 import json
 import os
 import re
-from typing import Dict, Any, Type
+from typing import Dict, Any, Type, Union
 from datetime import datetime, date
 from pydantic import BaseModel, create_model, field_validator
-from typing import Union
 
 
 def _upper_first(s: str) -> str:
@@ -56,20 +55,23 @@ def _camelize_keys(obj: Dict[str, Any]) -> Dict[str, Any]:
     return {camel(k): v for k, v in obj.items()}
 
 
-def get_pydantic_model(tb_name: str, schema: Dict) -> Type[BaseModel]:
+def get_pydantic_model(table_name: str, schema: Dict) -> Type[BaseModel]:
     """
     Dynamically creates a Pydantic model from a schema definition
     with a smart field validator to coerce types.
     """
-
-    columns = schema.get("columns", [])
+    columns_schema = schema.get("columns", {})
+    if not columns_schema:
+        msg = f"Schema for table '{table_name}' "
+        msg += "does not contain 'columns' definition."
+        raise ValueError(msg)
 
     # Define the fields with a flexible Union type hint
     pydantic_fields = {
-        col: (Union[float, int, date, str, None], None) for col in columns
+        col: (Union[float, int, date, str, None], None)
+        for col in columns_schema.keys()  # noqa:F501
     }
 
-    # Create a base model with the validator
     class TblRowModel(BaseModel):
         @field_validator("*", mode="before")
         @classmethod
@@ -81,21 +83,17 @@ def get_pydantic_model(tb_name: str, schema: Dict) -> Type[BaseModel]:
             if not v:
                 return None
 
-            # Try casting to int
             try:
-                # Use a more robust check for integers
                 if str(int(v)) == v:
                     return int(v)
             except (ValueError, TypeError):
                 pass
 
-            # Try casting to float
             try:
                 return float(v)
             except (ValueError, TypeError):
                 pass
 
-            # Try casting to date
             try:
                 return datetime.strptime(v, "%Y-%m-%d").date()
             except (ValueError, TypeError):
@@ -103,9 +101,10 @@ def get_pydantic_model(tb_name: str, schema: Dict) -> Type[BaseModel]:
 
             return v
 
-    # Create the final model inheriting from our base model
-    DynamicModel = create_model(
-        f"{tb_name.capitalize()}Model", __base__=TblRowModel, **pydantic_fields
+    dynamic_model = create_model(
+        f"{table_name.capitalize()}Model",
+        __base__=TblRowModel,
+        **pydantic_fields,
     )
 
-    return DynamicModel
+    return dynamic_model

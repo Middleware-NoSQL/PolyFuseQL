@@ -11,9 +11,6 @@ from typing import Any, Dict, List, Optional
 
 from neo4j import AsyncDriver, AsyncGraphDatabase, AsyncTransaction
 from neo4j import time as neo_time
-from polyfuseql.connector.Connector import Connector
-from polyfuseql.utils.tpch_schema import TPCH_SCHEMA
-from polyfuseql.utils.utils import _camelize_keys, env, get_pydantic_model
 from pydantic import ValidationError
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
@@ -26,6 +23,10 @@ from pyspark.sql.types import (
     StructType,
 )
 from sqlglot import exp
+
+from polyfuseql.catalogue.Catalogue import Catalogue
+from polyfuseql.connector.Connector import Connector
+from polyfuseql.utils.utils import _camelize_keys, env, get_pydantic_model
 
 
 async def _execute_batch_insert(
@@ -43,13 +44,15 @@ async def _execute_batch_insert(
 class Neo4jConnector(Connector):
     """
     Connector for Neo4j with PySpark for efficient aggregations.
-
-    IMPROVEMENT: This version has been modified to use Spark's native
-    Neo4j datasource for parallel data reading, avoiding driver bottlenecks.
+    Uses the user-defined schema from the Catalogue.
     """
 
-    def __init__(self, options: Optional[Dict] = None) -> None:
-        super().__init__(options)
+    def __init__(
+        self,
+        options: Optional[Dict] = None,
+        catalogue: Optional[Catalogue] = None,
+    ) -> None:
+        super().__init__(options, catalogue)
 
         logging.basicConfig(
             level=logging.INFO,
@@ -73,7 +76,6 @@ class Neo4jConnector(Connector):
         self._driver: Optional[AsyncDriver] = None
 
         spark_master_url = "local[*]"
-        # spark_master_url = "spark://cuscungo:7077"
 
         jar_path_str = os.environ.get(
             "NEO4J_SPARK_JAR_PATH",
@@ -88,19 +90,20 @@ class Neo4jConnector(Connector):
         if not jar_path.exists():
             msg = f"Neo4j Spark connector JAR not found at: {jar_path}\n "
             msg += "Please download it from Maven Central "
-            msg += "and place it in the 'jars' directory."  # noqa:F501
-            raise FileNotFoundError()
+            msg += "and place it in the 'jars' directory."
+            raise FileNotFoundError(msg)
         logging.info(f"Found local JAR: {jar_path_str}")
 
-        os.environ["PYSPARK_SUBMIT_ARGS"] = (
-            f'--jars "{jar_path_str}" pyspark-shell'  # noqa:F501
-        )
+        submit_args = '--jars "'
+        submit_args += f"{jar_path_str}"
+        submit_args += '" pyspark-shell'
+        os.environ["PYSPARK_SUBMIT_ARGS"] = submit_args
 
         if "local" not in spark_master_url:
+            app_name = "Neo4jConnector-TPCH-Benchmark-"
+            app_name += "Server"
             builder = (
-                SparkSession.builder.appName(
-                    "Neo4jConnector-TPCH-Benchmark-Server"
-                )  # noqa:F501
+                SparkSession.builder.appName(app_name)
                 .master(spark_master_url)
                 .config("spark.cores.max", "48")
                 .config("spark.driver.memory", "4g")
@@ -110,20 +113,21 @@ class Neo4jConnector(Connector):
                 .config("spark.executor.heartbeatInterval", "60s")
             )
         else:
+            app_name = "Neo4jConnector-TPCH-Benchmark-"
+            app_name += "Local"
             builder = (
-                SparkSession.builder.appName(
-                    "Neo4jConnector-TPCH-Benchmark-Local"
-                )  # noqa:F501
+                SparkSession.builder.appName(app_name)
                 .master(spark_master_url)
                 .config("spark.driver.memory", "4g")
             )
 
         self.spark = builder.getOrCreate()
-        msg = f"Spark session initialized and connected to master: {self.spark.sparkContext.master}"  # noqa:E501
+        msg = "Spark session initialized and connected to master: "
+        msg += f"{self.spark.sparkContext.master}"
         logging.info(msg)
-        logging.info(
-            f"Spark UI available at: {self.spark.sparkContext.uiWebUrl}"
-        )  # noqa:F501
+        msg = "Spark UI available at: "
+        msg += f"{self.spark.sparkContext.uiWebUrl}"
+        logging.info(msg)
 
     async def connect(self) -> None:
         if not self._driver:
@@ -260,10 +264,7 @@ class Neo4jConnector(Connector):
         label = table_name.capitalize()
         spark_schema = self._get_spark_schema(table_name)
 
-        # Schema for reading from Neo4j: Use
-        # DoubleType for all decimal-like fields.
         read_schema_fields = []
-        # Cypher expressions: Force cast to float at the source.
         return_expressions = []
 
         for field in spark_schema.fields:
@@ -299,12 +300,10 @@ class Neo4jConnector(Connector):
             .option("authentication.basic.username", self._auth[0])
             .option("authentication.basic.password", self._auth[1])
             .option("query", cypher_query)
-            .schema(read_schema)  # Use the read-friendly schema
+            .schema(read_schema)
             .load()
         )
 
-        # After loading safely as doubles,
-        # cast to the target high-precision DecimalType.
         for field in spark_schema.fields:
             if isinstance(field.dataType, DecimalType):
                 df = df.withColumn(
@@ -358,7 +357,6 @@ class Neo4jConnector(Connector):
         label = table_name.capitalize()
         spark_schema = self._get_spark_schema(table_name)
 
-        # Apply the same robust, multi-stage casting strategy
         read_schema_fields = []
         return_expressions = []
         for field in spark_schema.fields:
@@ -395,7 +393,6 @@ class Neo4jConnector(Connector):
 
         if df.isEmpty():
             alias = ast.expressions[0].alias_or_name
-            # Ensure return type matches expected Decimal for consistency
             return [{_camelize_keys({alias: 0})[alias]: Decimal(0.0)}]
 
         agg_expressions = []
@@ -428,23 +425,16 @@ class Neo4jConnector(Connector):
         self, table_name: str, file_path: str, batch_size: int = 5000
     ) -> int:
         driver = self._get_driver()
-        schema = TPCH_SCHEMA.get(table_name.lower())
+        schema = self.catalogue.get_schema(table_name)
         if not schema:
-            if table_name.lower() == "sales":
-                schema = {
-                    "columns": ["sale_id", "amount", "sale_date"],
-                    "types": ["str", "decimal", "date"],
-                }
-            else:
-                raise ValueError(
-                    f"No schema definition found for table: {table_name}"
-                )  # noqa:F501
+            msg = "No schema definition found for table: "
+            msg += f"{table_name}"
+            raise ValueError(msg)
 
-        cols = schema["columns"]
+        cols = list(schema["columns"].keys())
         label = table_name.capitalize()
-        DynamicModel = get_pydantic_model(table_name, schema)
+        dynamic_model = get_pydantic_model(table_name, schema)
 
-        # Clear existing data for a clean test run
         async with driver.session() as s:
             await s.run(f"MATCH (n:{label}) DETACH DELETE n")
 
@@ -464,24 +454,21 @@ class Neo4jConnector(Connector):
                         continue
                     try:
                         row_dict = dict(zip(cols, line[: len(cols)]))
-                        validated_data = DynamicModel(**row_dict)
+                        validated_data = dynamic_model(**row_dict)
                         model_dict = validated_data.model_dump()
 
-                        # Convert Python types to Neo4j-compatible types
                         for key, value in model_dict.items():
                             if isinstance(value, date):
                                 model_dict[key] = neo_time.Date.from_native(
                                     value
                                 )  # noqa:F501
-                            # Pydantic may convert to Decimal, ensure it's a
-                            # float for Neo4j driver  # noqa:F501
                             if isinstance(value, Decimal):
                                 model_dict[key] = float(value)
 
                         batch.append(model_dict)
                     except ValidationError as e:
                         msg = "Skipping row due to validation "
-                        msg += f"error: {line}. Error: {e}"  # noqa:F501
+                        msg += f"error: {line}. Error: {e}"
                         logging.warning(msg)
                         continue
 
@@ -508,24 +495,16 @@ class Neo4jConnector(Connector):
         return total_inserted
 
     def _get_spark_schema(self, table_name: str) -> StructType:
-        sch_def = TPCH_SCHEMA.get(table_name.lower())
+        sch_def = self.catalogue.get_schema(table_name)
         if not sch_def:
-            if table_name.lower() == "sales":
-                return StructType(
-                    [
-                        StructField("sale_id", StringType(), True),
-                        StructField("amount", DecimalType(38, 10), True),
-                        StructField("sale_date", DateType(), True),
-                    ]
-                )
-            raise ValueError(
-                f"No schema definition found for table: {table_name}"
-            )  # noqa:F501
+            msg = "No schema definition found for table: "
+            msg += f"{table_name}"
+            raise ValueError(msg)
         fields = []
-        for c_name, c_type in zip(sch_def["columns"], sch_def["types"]):
-            if c_type == "date":
+        for c_name, c_type_str in sch_def["columns"].items():
+            if c_type_str == "date":
                 fields.append(StructField(c_name, DateType(), True))
-            elif "decimal" in c_type:
+            elif "decimal" in c_type_str:
                 fields.append(StructField(c_name, DecimalType(38, 10), True))
             else:
                 fields.append(StructField(c_name, StringType(), True))

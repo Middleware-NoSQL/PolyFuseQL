@@ -1,22 +1,22 @@
+import csv
 import logging
 import os
 import sys
 import zipfile
-from pathlib import Path
-from typing import Dict, Any, Optional, List
-from polyfuseql.connector.Connector import Connector
-from polyfuseql.utils.utils import env, _camelize_keys, get_pydantic_model
-from polyfuseql.utils.tpch_schema import TPCH_SCHEMA
-import redis.asyncio as aioredis
-from sqlglot import exp
-import csv
-from pydantic import ValidationError
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-# PySpark Integration
+import redis.asyncio as aioredis
+from pydantic import ValidationError
+from sqlglot import exp
+
+from polyfuseql.catalogue.Catalogue import Catalogue
+from polyfuseql.connector.Connector import Connector
+from polyfuseql.utils.utils import env, get_pydantic_model, _camelize_keys
+
 try:
-    from pyspark.sql import SparkSession
-    from pyspark.sql import functions as F
+    from pyspark.sql import SparkSession, functions as F
     from pyspark.sql.types import (
         StructType,
         StructField,
@@ -33,11 +33,14 @@ except ImportError:
 
 
 class RedisConnector(Connector):
-    """Connector for Redis with persistent connection handling
-    and PySpark for complex queries."""
+    """Connector for Redis, now using the schema-aware Catalogue."""
 
-    def __init__(self, options: Optional[Dict] = None) -> None:
-        super().__init__(options or {})
+    def __init__(
+        self,
+        options: Optional[Dict] = None,
+        catalogue: Optional[Catalogue] = None,
+    ) -> None:
+        super().__init__(options or {}, catalogue)
         self._host = env("REDIS_HOST", "localhost")
         self._port = int(env("REDIS_PORT", "6379"))
         self._password = env("REDIS_PASSWORD", "tpch")
@@ -46,65 +49,40 @@ class RedisConnector(Connector):
         self._dependencies_zip: Optional[str] = None
 
     def _prepare_dependencies(self) -> None:
-        """
-        Packages essential libraries ('redis', 'async_timeout') into a zip
-        file for distribution to Spark workers. This targeted approach avoids
-        binary incompatibilities from complex dependencies.
-        """
         project_root = Path(__file__).parent.parent.parent
         zip_path = project_root / "dependencies.zip"
         self._dependencies_zip = str(zip_path)
-
         if zip_path.exists():
-            logging.info(f"Dependency file already exists: {zip_path}")
             return
-
-        logging.info("Creating targeted dependencies zip at: " f"{zip_path}")
         try:
             venv_path = Path(sys.prefix)
             site_packages = next(venv_path.glob("**/site-packages"))
-
-            # List of required libraries to package
             required_libs = ["redis", "async_timeout"]
             lib_paths = [site_packages / lib for lib in required_libs]
-
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
                 for lib_path in lib_paths:
                     if not lib_path.exists():
-                        msg = "Could not find "
-                        msg += f"'{lib_path.name}' in site-packages."
+                        msg = f"Could not find '{lib_path.name}' "
+                        msg += "in site-packages."
                         raise FileNotFoundError(msg)
-
                     for file in lib_path.rglob("*"):
                         arcname = file.relative_to(site_packages)
                         zf.write(file, arcname)
-                    logging.info(f"Successfully zipped '{lib_path}'.")
-
         except Exception as e:
             logging.error(f"Failed to create dependencies zip file: {e}")
             self._dependencies_zip = None
 
     def _init_spark(self) -> Optional["SparkSession"]:
-        """
-        Initializes the SparkSession, ensuring it's configured with the
-        necessary dependencies for distributed execution. It uses a robust
-        method of adding dependencies to an existing session if one is found.
-        """
         if not SPARK_AVAILABLE:
-            msg = "PySpark not found. "
-            msg += "Complex queries will be slow."
-            logging.warning(msg)
+            logging.warning("PySpark not found. Complex queries will be slow.")
             return None
         try:
             spark_master_url = env("SPARK_MASTER_URL", "local[*]")
-            config_key = "spark.sql.legacy.timeParserPolicy"
-            config_value = "LEGACY"
             builder = (
                 SparkSession.builder.appName("PolyFuseQL-Connector")
                 .master(spark_master_url)
-                .config(config_key, config_value)
+                .config("spark.sql.legacy.timeParserPolicy", "LEGACY")
             )
-
             if "local" not in spark_master_url:
                 builder = (
                     builder.config("spark.cores.max", "48")
@@ -118,21 +96,13 @@ class RedisConnector(Connector):
                 builder = builder.config("spark.driver.memory", "4g")
 
             spark_session = builder.getOrCreate()
-            logging.info("Spark session obtained.")
-
             if "local" not in spark_master_url:
                 self._prepare_dependencies()
                 if self._dependencies_zip:
                     spark_session.sparkContext.addPyFile(
                         self._dependencies_zip
                     )  # noqa:F501
-                    msg = "Added dependency file to Python "
-                    msg += "path on all workers: "
-                    msg += f"{self._dependencies_zip}"
-                    logging.info(msg)
-
             return spark_session
-
         except PySparkException as e:
             logging.error(f"Failed to initialize SparkSession: {e}")
             return None
@@ -145,30 +115,24 @@ class RedisConnector(Connector):
                 decode_responses=True,
                 password=self._password,
             )
-            logging.info("Redis client initialized.")
 
     async def disconnect(self) -> None:
         if self._client:
             await self._client.aclose()
             self._client = None
-            logging.info("Redis connection closed.")
         if self.spark:
             self.spark.stop()
             self.spark = None
-            logging.info("SparkSession stopped.")
         if self._dependencies_zip and os.path.exists(self._dependencies_zip):
             try:
                 os.remove(self._dependencies_zip)
-                msg = "Removed temporary dependencies file: "
-                msg += f"{self._dependencies_zip}"
-                logging.info(msg)
             except OSError as e:
                 logging.warning(f"Error removing dependencies file: {e}")
 
     def _get_client(self) -> aioredis.Redis:
         if not self._client:
             raise ConnectionError(
-                "RedisConnector is not connected. " "Call connect() first."
+                "RedisConnector is not connected. Call connect() first."
             )
         return self._client
 
@@ -180,12 +144,10 @@ class RedisConnector(Connector):
         r = self._get_client()
         prfx = f"{entity.capitalize()}:*"
         total = 0
-        cursor = 0
-        while True:
+        cursor = "0"
+        while cursor != 0:
             cursor, keys = await r.scan(cursor=cursor, match=prfx, count=1000)
             total += len(keys)
-            if cursor == 0:
-                break
         return total
 
     async def get(
@@ -197,23 +159,31 @@ class RedisConnector(Connector):
         if not raw_data:
             return {}
 
-        schema = TPCH_SCHEMA.get(entity.lower())
+        schema = self.catalogue.get_schema(entity)
         if not schema:
-            return raw_data
+            return raw_data  # Return raw data if no schema is found
 
         DynamicModel = get_pydantic_model(entity, schema)
         try:
             validated_model = DynamicModel(**raw_data)
             return validated_model.model_dump()
         except ValidationError:
-            return raw_data
+            return raw_data  # Return raw on validation failure
 
     async def insert(self, entity: str, payload: Dict[str, Any]) -> Any:
         r = self._get_client()
-        pk_col = self._options.get("pk", "id")
-        pk_val = payload.get(pk_col)
+        schema = self.catalogue.get_schema(entity)
+        if not schema:
+            raise ValueError(f"No schema for table: {entity}")
+
+        pk_col = schema["pk"]
+        if isinstance(pk_col, list):
+            pk_val = ":".join(str(payload.get(k)) for k in pk_col)
+        else:
+            pk_val = payload.get(pk_col)
+
         if not pk_val:
-            pk_val = next(iter(payload.values()))
+            raise ValueError("Primary key value not found in payload.")
 
         key = f"{entity.capitalize()}:{pk_val}"
         str_payload = {k: str(v) for k, v in payload.items()}
@@ -238,7 +208,7 @@ class RedisConnector(Connector):
 
     async def get_all(self, entity: str) -> List[Dict[str, Any]]:
         r = self._get_client()
-        keys = await r.keys(f"{entity.capitalize()}:*")
+        keys = [key async for key in r.scan_iter(f"{entity.capitalize()}:*")]
         if not keys:
             return []
         pipe = r.pipeline()
@@ -250,13 +220,15 @@ class RedisConnector(Connector):
     async def query(
         self, sql: str, params: tuple = None
     ) -> List[dict[str, Any]]:  # noqa:F501
-        msg = "RedisConnector does not support raw SQL queries."
+        msg = "RedisConnector does not support "
+        msg += "raw SQL queries."
         raise NotImplementedError(msg)
 
     def _get_spark_schema(self, table_name: str) -> Optional["StructType"]:
-        schema_def = TPCH_SCHEMA.get(table_name.lower())
+        schema_def = self.catalogue.get_schema(table_name)
         if not schema_def:
             return None
+
         type_mapping = {
             "int": IntegerType(),
             "str": StringType(),
@@ -267,15 +239,11 @@ class RedisConnector(Connector):
             StructField(
                 col_name, type_mapping.get(col_type, StringType()), True
             )  # noqa:F501
-            for col_name, col_type in zip(
-                schema_def["columns"], schema_def["types"]
-            )  # noqa:F501
+            for col_name, col_type in schema_def["columns"].items()
         ]
         return StructType(fields)
 
     def _translate_expression_to_spark(self, expression: exp.Expression):
-        """Recursively translates a sqlglot expression to
-        a PySpark Column expression."""
         if isinstance(expression, exp.Star):
             return F.lit(1)
         if isinstance(expression, exp.Column):
@@ -287,19 +255,17 @@ class RedisConnector(Connector):
                 return F.lit(expression.this)
         if isinstance(expression, exp.Paren):
             return self._translate_expression_to_spark(expression.this)
-
         if isinstance(expression, exp.Binary):
             left = self._translate_expression_to_spark(expression.left)
             right = self._translate_expression_to_spark(expression.right)
-            if isinstance(expression, exp.Mul):
-                return left * right
-            if isinstance(expression, exp.Sub):
-                return left - right
-            if isinstance(expression, exp.Add):
-                return left + right
-            if isinstance(expression, exp.LTE):
-                return left <= right
-
+            op_map = {
+                exp.Mul: lambda a, b: a * b,
+                exp.Sub: lambda a, b: a - b,
+                exp.Add: lambda a, b: a + b,
+                exp.LTE: lambda a, b: a <= b,
+            }
+            if type(expression) in op_map:
+                return op_map[type(expression)](left, right)
         if (
             isinstance(expression, exp.Cast)
             and expression.to.this == exp.DataType.Type.DATE
@@ -312,7 +278,8 @@ class RedisConnector(Connector):
     async def join(self, ast: exp.Select) -> List[Dict[str, Any]]:
         if not self.spark:
             raise NotImplementedError("PySpark is not available for JOINs.")
-        msg = "PySpark JOIN logic is not fully implemented yet."
+        msg = "PySpark JOIN logic is "
+        msg += "not fully implemented yet."
         raise NotImplementedError(msg)
 
     async def group_by(self, ast: exp.Select) -> List[Dict[str, Any]]:
@@ -322,131 +289,88 @@ class RedisConnector(Connector):
             raise RuntimeError("PySpark is required for GROUP BY operations.")
 
         table_name = ast.find(exp.Table).name
-
-        logging.info(f"Fetching keys for table '{table_name}' from Redis.")
         r = self._get_client()
-        keys = await r.keys(f"{table_name.capitalize()}:*")
+        keys = [
+            key async for key in r.scan_iter(f"{table_name.capitalize()}:*")
+        ]  # noqa:F501
         if not keys:
-            logging.warning(f"No keys found for table '{table_name}'.")
             return []
-        logging.info(f"Found {len(keys)} keys. Distributing to Spark workers.")
 
         num_slices = self.spark.sparkContext.defaultParallelism * 4
         keys_rdd = self.spark.sparkContext.parallelize(
             keys, numSlices=num_slices
         )  # noqa:F501
+        redis_config = {
+            "host": self._host,
+            "port": self._port,
+            "password": self._password,
+        }
 
-        redis_host = self._host
-        redis_port = self._port
-        redis_password = self._password
-
-        def fetch_redis_data_partitions(iterator):
+        def fetch_redis_data(iterator):
             import redis
 
             partition_keys = list(iterator)
             if not partition_keys:
                 return iter([])
-
-            r_sync = redis.Redis(
-                host=redis_host,
-                port=redis_port,
-                password=redis_password,
-                decode_responses=True,
-            )
+            r_sync = redis.Redis(**redis_config, decode_responses=True)
             pipe = r_sync.pipeline(transaction=False)
-
             for key in partition_keys:
                 pipe.hgetall(key)
-
             return iter(pipe.execute())
 
-        logging.info("Spark workers are now fetching data from Redis.")
-        data_rdd = keys_rdd.mapPartitions(fetch_redis_data_partitions)
-
+        data_rdd = keys_rdd.mapPartitions(fetch_redis_data)
         if data_rdd.isEmpty():
-            msg = "No data returned from Redis after parallel fetch."
-            logging.warning(msg)
             return []
 
         df = data_rdd.toDF()
+        target_schema = self._get_spark_schema(table_name)
+        if not target_schema:
+            raise ValueError(f"No Spark schema for table {table_name}")
 
-        target_spark_schema = self._get_spark_schema(table_name)
-        if not target_spark_schema:
-            raise ValueError(f"No Spark schema defined for table {table_name}")
-
-        for field in target_spark_schema.fields:
-            col_name = field.name
-            if col_name in df.columns:
+        for field in target_schema.fields:
+            if field.name in df.columns:
                 df = df.withColumn(
-                    col_name, F.col(col_name).cast(field.dataType)
+                    field.name, F.col(field.name).cast(field.dataType)
                 )  # noqa:F501
 
-        logging.info("Successfully created and typed " "Spark DataFrame.")
-
-        where_clause = ast.args.get("where")
-        if where_clause:
-            filter_condition = self._translate_expression_to_spark(
-                where_clause.this
+        if ast.args.get("where"):
+            filter_cond = self._translate_expression_to_spark(
+                ast.args["where"].this
             )  # noqa:F501
-            df = df.filter(filter_condition)
-            logging.info("Applied WHERE clause.")
+            df = df.filter(filter_cond)
 
         group_by_cols = [
-            col.this.name for col in ast.args.get("group").expressions
+            c.this.name for c in ast.args.get("group").expressions
         ]  # noqa:F501
         grouped_df = df.groupBy(*group_by_cols)
-        logging.info(f"Applied GROUP BY on: {group_by_cols}")
 
         agg_expressions = []
-        final_select_cols = [e.alias_or_name for e in ast.expressions]
-
-        for expression in ast.expressions:
-            if isinstance(expression, exp.Alias) and isinstance(
-                expression.this, exp.AggFunc
-            ):
-                agg_func = expression.this
-                alias = expression.alias_or_name
+        final_cols = [e.alias_or_name for e in ast.expressions]
+        for expr in ast.expressions:
+            if isinstance(expr, exp.Alias) and isinstance(
+                expr.this, exp.AggFunc
+            ):  # noqa:F501
+                agg_func = expr.this
+                alias = expr.alias_or_name
                 inner_expr = self._translate_expression_to_spark(agg_func.this)
-
-                high_precision_decimal = DecimalType(38, 6)
-
-                if isinstance(agg_func, exp.Sum):
-                    agg_expr = (
-                        F.sum(inner_expr)
-                        .cast(high_precision_decimal)
-                        .alias(alias)  # noqa:F501
-                    )
-                elif isinstance(agg_func, exp.Avg):
-                    agg_expr = (
-                        F.avg(inner_expr)
-                        .cast(high_precision_decimal)
-                        .alias(alias)  # noqa:F501
-                    )
-                elif isinstance(agg_func, exp.Count):
-                    agg_expr = F.count(inner_expr).alias(alias)
-                else:
-                    raise NotImplementedError(
-                        "Unsupported aggregate function: " f"{type(agg_func)}"
-                    )
-                agg_expressions.append(agg_expr)
+                agg_map = {
+                    exp.Sum: F.sum,
+                    exp.Avg: F.avg,
+                    exp.Count: F.count,
+                }
+                if type(agg_func) in agg_map:
+                    agg_expr = agg_map[type(agg_func)](inner_expr)
+                    if type(agg_func) in [exp.Sum, exp.Avg]:
+                        agg_expr = agg_expr.cast(DecimalType(38, 6))
+                    agg_expressions.append(agg_expr.alias(alias))
 
         agg_df = grouped_df.agg(*agg_expressions)
-        logging.info("Applied aggregations.")
-
-        order_by_clause = ast.args.get("order")
-        if order_by_clause:
-            order_cols = [
-                col.this.name for col in order_by_clause.expressions
-            ]  # noqa:F501
+        if ast.args.get("order"):
+            order_cols = [c.this.name for c in ast.args["order"].expressions]
             agg_df = agg_df.orderBy(*order_cols)
-            logging.info(f"Applied ORDER BY on: {order_cols}")
 
-        final_df = agg_df.select(*final_select_cols)
-
-        logging.info("Spark job starting collection...")
+        final_df = agg_df.select(*final_cols)
         results = [row.asDict() for row in final_df.collect()]
-        logging.info(f"Spark job finished. Collected {len(results)} rows.")
-
         return [_camelize_keys(row) for row in results]
 
     async def aggregate(self, ast: exp.Select) -> List[Dict[str, Any]]:
@@ -459,39 +383,30 @@ class RedisConnector(Connector):
             if isinstance(expr, exp.Alias) and isinstance(
                 expr.this, exp.AggFunc
             ):  # noqa:F501
-                agg_func = expr.this
-                alias = expr.alias_or_name
-
+                agg_func, alias = expr.this, expr.alias_or_name
                 if isinstance(agg_func, exp.Count):
                     result_row[alias] = len(all_data)
                     continue
-
                 values = [
                     self._evaluate_expression(agg_func.this, row)
                     for row in all_data  # noqa:F501
-                ]  # noqa:F501
-
+                ]
                 if isinstance(agg_func, exp.Sum):
                     result_row[alias] = sum(values)
                 elif isinstance(agg_func, exp.Avg):
                     result_row[alias] = (
-                        sum(values) / Decimal(len(values))
-                        if values
-                        else Decimal("0.0")  # noqa:F501
-                    )  # noqa:F501
-
+                        sum(values) / len(values) if values else Decimal("0.0")
+                    )
         return [_camelize_keys(result_row)]
 
     async def bulk_insert(self, table_name: str, file_path: str) -> int:
         r = self._get_client()
-        if table_name.lower() in ["lineitem", "sales"]:
-            await r.flushdb()
-        schema = TPCH_SCHEMA.get(table_name.lower())
+        schema = self.catalogue.get_schema(table_name)
         if not schema:
             raise ValueError(f"No schema for table: {table_name}")
 
-        columns, pk_info = schema["columns"], schema["pk"]
-        DynamicModel = get_pydantic_model(table_name, schema)
+        columns, pk_info = list(schema["columns"].keys()), schema["pk"]
+        dynamic_model = get_pydantic_model(table_name, schema)
         inserted_count, batch = 0, []
         try:
             with open(file_path, "r", encoding="utf-8") as f:
@@ -501,13 +416,13 @@ class RedisConnector(Connector):
                         continue
                     try:
                         row_dict = dict(zip(columns, row[: len(columns)]))
-                        validated_data = DynamicModel(**row_dict)
+                        validated_data = dynamic_model(**row_dict)
                         batch.append(validated_data.model_dump())
                         inserted_count += 1
                     except ValidationError as e:
                         logging.warning(
-                            f"Skipping malformed row: {row}. " f"Error: {e}"
-                        )
+                            f"Skipping malformed row: {row}. Error: {e}"
+                        )  # noqa:F501
         except FileNotFoundError:
             logging.error(f"File not found: {file_path}")
             return 0
@@ -518,7 +433,7 @@ class RedisConnector(Connector):
                     ":".join([str(payload[k]) for k in pk_info])
                     if isinstance(pk_info, list)
                     else payload[pk_info]
-                )  # noqa:F501
+                )
                 key = f"{table_name.capitalize()}:{pk_val}"
                 str_payload = {k: str(v) for k, v in payload.items()}
                 await pipe.hset(key, mapping=str_payload)
