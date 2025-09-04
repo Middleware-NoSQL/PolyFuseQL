@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, Optional
 
 from polyfuseql.catalogue.Catalogue import Catalogue
 from polyfuseql.connector.Connector import Connector
@@ -11,14 +11,15 @@ class ConnectorFactory:
     @staticmethod
     def create_connector(
         conn_type: str,
-        options: Dict = None,
         catalogue: Catalogue = None,
+        options: Optional[Dict] = None,
     ) -> Connector:
+        options = options or {}
         if conn_type == "neo4j":
-            return Neo4jConnector(options, catalogue)
+            return Neo4jConnector(catalogue)
         elif conn_type == "postgres":
-            return PostgresConnector(options, catalogue)
+            return PostgresConnector(catalogue)
         elif conn_type == "redis":
-            return RedisConnector(options, catalogue)
+            return RedisConnector(catalogue, options)
         else:
             raise ValueError(f"Unknown connector type: {conn_type}")

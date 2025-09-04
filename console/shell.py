@@ -15,6 +15,14 @@ class PolyFuseQLShell:
         self.state = PolyFuseQLState()
         self.console = Console()
 
+    def get_prompt_text(self) -> str:
+        """Constructs the prompt string based on the current state."""
+        engine = self.state.current_engine
+        if engine == "redis":
+            redis_type = self.state.client.rd.get_data_type()
+            return f"poly-sql ({engine}:{redis_type})> "
+        return f"poly-sql ({engine})> "
+
     async def run(self):
         """The main async run loop of the shell."""
         session = PromptSession(history=FileHistory(self.state.history_file))
@@ -32,7 +40,7 @@ class PolyFuseQLShell:
         async with self.state.client:
             while self.state.is_running:
                 try:
-                    prompt_text = f"poly-sql ({self.state.current_engine})> "
+                    prompt_text = self.get_prompt_text()
                     text = await session.prompt_async(
                         prompt_text, completer=completer, refresh_interval=0.5
                     )

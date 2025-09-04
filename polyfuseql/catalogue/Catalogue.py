@@ -1,12 +1,9 @@
 import json
 import logging
-import os
-import pathlib
 from pathlib import Path
 from typing import Dict, Any, Optional, Union
 
-# Define ROOT more robustly
-ROOT = pathlib.Path(__file__).resolve().parent.parent
+from polyfuseql.config import settings
 
 
 class Catalogue(dict):
@@ -19,42 +16,21 @@ class Catalogue(dict):
         self, schema_path: Union[str, Path, None] = None, **kwargs
     ) -> None:  # noqa:F501
         super().__init__(**kwargs)
-        self._schema_path = self._resolve_schema_path(schema_path)
+        # If a path is explicitly passed, it takes precedence.
+        # Otherwise, use the global settings.
+        self._schema_path = (
+            Path(schema_path)
+            if schema_path
+            else settings.polyfuseql_schema_path  # noqa:F501
+        )
 
         if not self._schema_path or not self._schema_path.exists():
             msg = "No schema file provided or found. "
-            msg += "Catalogue is empty."
+            msg += f"Looked for: {self._schema_path}. Catalogue is empty."
             logging.warning(msg)
             return
 
         self._load_and_validate_schema()
-
-    def _resolve_schema_path(
-        self, schema_path: Union[str, Path, None]
-    ) -> Optional[Path]:
-        """
-        Determines the schema file path to use.
-        Precedence: explicit path > env var > default path.
-        """
-        if schema_path:
-            path = Path(schema_path)
-            if not path.exists():
-                raise FileNotFoundError(f"Schema file not found at: {path}")
-            return path
-
-        if env_path := os.getenv("POLYFUSEQL_SCHEMA_PATH"):
-            path = Path(env_path)
-            if not path.exists():
-                msg = "Schema file from POLYFUSEQL_SCHEMA_PATH not found at: "
-                msg += f"{path}"
-                raise FileNotFoundError(msg)
-            return path
-
-        default_path = ROOT / "catalogue" / "schemas.json"
-        if default_path.exists():
-            return default_path
-
-        return None
 
     def _load_and_validate_schema(self) -> None:
         """Loads and validates the schema from the resolved JSON file."""

@@ -24,14 +24,15 @@ class InsertStrategy(QueryStrategy):
 
         if not isinstance(ast, exp.Insert):
             raise ValueError("AST node is not an Insert expression")
-        if use_catalogue:
-            catalogue_entry = client._catalogue.get(table_name)
-            _, table = catalogue_entry
-        else:
-            table = table_name
+        # if use_catalogue:
+        #    catalogue_entry = client._catalogue.get(table_name)
+        #    logging.info(f"Using catalogue: {catalogue_entry}")
+        #    _, table = catalogue_entry
+        # else:
+        table = table_name
 
-        logging.info("insert-strategy-table", table)
-        logging.info("insert-strategy-table-type", type(table))
+        logging.info(f"insert-strategy-table {table}")
+        logging.info(f"insert-strategy-table-type {type(table)}")
 
         columns = [col.name for col in ast.this.expressions]
 
@@ -46,6 +47,7 @@ class InsertStrategy(QueryStrategy):
 
         payload = dict(zip(columns, values))
         conn = client.backends[backend]
-        logging.info("insert-strategy-payload", payload)
-        logging.info("insert-strategy-table", table)
+        logging.info(f"insert-strategy-payload: {payload}")
+        logging.info(f"insert-strategy-table: {table}")
+        logging.info(f"insert-strategy-backend: {backend}")
         return await conn.insert(table, payload)

@@ -30,20 +30,16 @@ class PolyClient:
 
     def __init__(
         self,
-        options: Dict = None,
-        schema_path: Union[str, Path, None] = "schemas.json",
+        options: Optional[Dict] = None,
+        schema_path: Union[str, Path, None] = None,
     ) -> None:
         self.options = options or {}
         self.catalogue = Catalogue(schema_path)
-        self.pg = ConnectorFactory.create_connector(
-            "postgres", self.options, self.catalogue
-        )
+        self.pg = ConnectorFactory.create_connector("postgres", self.catalogue)
         self.rd = ConnectorFactory.create_connector(
-            "redis", self.options, self.catalogue
+            "redis", self.catalogue, self.options
         )
-        self.nj = ConnectorFactory.create_connector(
-            "neo4j", self.options, self.catalogue
-        )
+        self.nj = ConnectorFactory.create_connector("neo4j", self.catalogue)
         self._catalogue = self.catalogue  # Keep for backward compatibility
         self.backends = {
             "postgres": self.pg,

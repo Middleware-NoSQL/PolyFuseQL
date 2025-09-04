@@ -16,7 +16,11 @@ class UpdateStrategy(QueryStrategy):
                 msg = f"Table '{table_name}' not " f"found in catalogue."
                 raise ValueError(msg)
 
-            expected_backend, pk_col = catalogue_entry
+            expected_backend, pk_col = (
+                catalogue_entry.get("backend") if not backend else backend
+            ), catalogue_entry.get(
+                "pk"
+            )  # noqa:F501
             conn = client.backends.get(expected_backend)
         else:
             pk_col = where_expr.left.name
@@ -29,8 +33,8 @@ class UpdateStrategy(QueryStrategy):
 
         # Extract primary key value from WHERE clause
         if where_expr.left.name != pk_col:
-            logging.info("update-where_expr.left.name", where_expr.left.name)
-            logging.info("update-where_expr.pk_col", pk_col)
+            logging.info(f"update-where_expr.left.name {where_expr.left.name}")
+            logging.info(f"update-where_expr.pk_col {pk_col}")
             msg = (
                 f"UPDATE on table '{table_name}' must use the "
                 f"primary key '{pk_col}' in WHERE clause."
@@ -59,12 +63,12 @@ class UpdateStrategy(QueryStrategy):
                         payload[col_name] = int(val_expr.this)
                     except ValueError:
                         payload[col_name] = float(val_expr.this)
-        logging.info("update-strategy-table", table_name)
-        logging.info("update-strategy-pk_col", pk_col)
-        logging.info("update-strategy-pk_val", pk_val)
-        logging.info("update-strategy-payload", payload)
-        logging.info("update-strategy-backend", backend)
-        logging.info("update-strategy-use_catalogue", use_catalogue)
-        logging.info("update-strategy-conn", conn)
+        logging.info(f"update-strategy-table: {table_name}")
+        logging.info(f"update-strategy-pk_col: {pk_col}")
+        logging.info(f"update-strategy-pk_val: {pk_val}")
+        logging.info(f"update-strategy-payload: {payload}")
+        logging.info(f"update-strategy-backend: {backend}")
+        logging.info(f"update-strategy-use_catalogue: {use_catalogue}")
+        logging.info(f"update-strategy-conn: {conn}")
         updated_count = await conn.update(table_name, pk_col, pk_val, payload)
         return {"updated_count": updated_count, "backend": expected_backend}

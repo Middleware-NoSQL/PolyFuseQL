@@ -1,4 +1,5 @@
 import csv
+import json
 import logging
 import os
 import sys
@@ -12,8 +13,9 @@ from pydantic import ValidationError
 from sqlglot import exp
 
 from polyfuseql.catalogue.Catalogue import Catalogue
+from polyfuseql.config import settings
 from polyfuseql.connector.Connector import Connector
-from polyfuseql.utils.utils import env, get_pydantic_model, _camelize_keys
+from polyfuseql.utils.utils import get_pydantic_model, _camelize_keys
 
 try:
     from pyspark.sql import SparkSession, functions as F
@@ -25,7 +27,6 @@ try:
         DateType,
         IntegerType,
     )
-    from pyspark.errors import PySparkException
 
     SPARK_AVAILABLE = True
 except ImportError:
@@ -33,20 +34,25 @@ except ImportError:
 
 
 class RedisConnector(Connector):
-    """Connector for Redis, now using the schema-aware Catalogue."""
+    """Connector for Redis with configurable data type strategies."""
 
     def __init__(
         self,
-        options: Optional[Dict] = None,
         catalogue: Optional[Catalogue] = None,
+        options: Optional[Dict] = None,
     ) -> None:
-        super().__init__(options or {}, catalogue)
-        self._host = env("REDIS_HOST", "localhost")
-        self._port = int(env("REDIS_PORT", "6379"))
-        self._password = env("REDIS_PASSWORD", "tpch")
+        super().__init__(options=options, catalogue=catalogue)
+        self._host = settings.redis_host
+        self._port = settings.redis_port
+        self._password = settings.redis_password
         self._client: Optional[aioredis.Redis] = None
         self.spark: Optional["SparkSession"] = None
         self._dependencies_zip: Optional[str] = None
+        self._init_spark()
+
+    def get_data_type(self) -> str:
+        """Returns the current data type strategy for Redis operations."""
+        return self._options.get("data_type", settings.redis_data_type)
 
     def _prepare_dependencies(self) -> None:
         project_root = Path(__file__).parent.parent.parent
@@ -72,40 +78,59 @@ class RedisConnector(Connector):
             logging.error(f"Failed to create dependencies zip file: {e}")
             self._dependencies_zip = None
 
-    def _init_spark(self) -> Optional["SparkSession"]:
+    def _init_spark(self) -> None:
         if not SPARK_AVAILABLE:
             logging.warning("PySpark not found. Complex queries will be slow.")
-            return None
-        try:
-            spark_master_url = env("SPARK_MASTER_URL", "local[*]")
-            builder = (
-                SparkSession.builder.appName("PolyFuseQL-Connector")
-                .master(spark_master_url)
-                .config("spark.sql.legacy.timeParserPolicy", "LEGACY")
-            )
-            if "local" not in spark_master_url:
-                builder = (
-                    builder.config("spark.cores.max", "48")
-                    .config("spark.driver.memory", "4g")
-                    .config("spark.executor.memory", "3g")
-                    .config("spark.sql.shuffle.partitions", "144")
-                    .config("spark.network.timeout", "8000s")
-                    .config("spark.executor.heartbeatInterval", "60s")
-                )
-            else:
-                builder = builder.config("spark.driver.memory", "4g")
+            return
 
-            spark_session = builder.getOrCreate()
-            if "local" not in spark_master_url:
-                self._prepare_dependencies()
-                if self._dependencies_zip:
-                    spark_session.sparkContext.addPyFile(
-                        self._dependencies_zip
-                    )  # noqa:F501
-            return spark_session
-        except PySparkException as e:
-            logging.error(f"Failed to initialize SparkSession: {e}")
-            return None
+        active_session = SparkSession.getActiveSession()
+        if active_session:
+            logging.warning(
+                "An existing Spark session was found. "
+                "Stopping it to apply new configurations."
+            )
+            active_session.stop()
+
+        spark_master_url = settings.spark_master_url
+
+        if "local" not in spark_master_url:
+            app_name = f"{settings.spark_app_name_prefix}-Server"
+            builder = (
+                SparkSession.builder.appName(app_name)
+                .master(spark_master_url)
+                .config("spark.cores.max", settings.spark_cores_max)
+                .config("spark.driver.memory", settings.spark_driver_memory)
+                .config(
+                    "spark.executor.memory", settings.spark_executor_memory
+                )  # noqa:F501
+                .config(
+                    "spark.sql.shuffle.partitions",
+                    settings.spark_shuffle_partitions,
+                )
+                .config(
+                    "spark.network.timeout", settings.spark_network_timeout
+                )  # noqa:F501
+                .config(
+                    "spark.executor.heartbeatInterval",
+                    settings.spark_executor_heartbeat_interval,
+                )
+            )
+        else:
+            app_name = f"{settings.spark_app_name_prefix}-Local"
+            builder = (
+                SparkSession.builder.appName(app_name)
+                .master(spark_master_url)
+                .config("spark.driver.memory", settings.spark_driver_memory)
+            )
+
+        self.spark = builder.getOrCreate()
+        logging.info(
+            "Spark session initialized and connected to master: "
+            f"{self.spark.sparkContext.master}"
+        )
+        logging.info(
+            "Spark UI available at: " f"{self.spark.sparkContext.uiWebUrl}"
+        )  # noqa:F501
 
     async def connect(self) -> None:
         if not self._client:
@@ -142,7 +167,8 @@ class RedisConnector(Connector):
 
     async def count(self, entity: str) -> int:
         r = self._get_client()
-        prfx = f"{entity.capitalize()}:*"
+        pk_suffix = self.get_data_type()
+        prfx = f"{entity.capitalize()}:*:{pk_suffix}"
         total = 0
         cursor = "0"
         while cursor != 0:
@@ -154,8 +180,19 @@ class RedisConnector(Connector):
         self, entity: str, pk_col: str, pk_val: Any
     ) -> Dict[str, Any]:  # noqa:F501
         r = self._get_client()
-        key = f"{entity.capitalize()}:{pk_val}"
-        raw_data = await r.hgetall(key)
+        key = f"{entity.capitalize()}:{pk_val}:{self.get_data_type()}"
+
+        data_type = self.get_data_type()
+        raw_data = None
+        if data_type == "string":
+            raw_data_str = await r.get(key)
+            if raw_data_str:
+                raw_data = json.loads(raw_data_str)
+        elif data_type == "json":
+            raw_data = await r.json().get(key)
+        else:  # 'hash' is the default
+            raw_data = await r.hgetall(key)
+
         if not raw_data:
             return {}
 
@@ -163,10 +200,10 @@ class RedisConnector(Connector):
         if not schema:
             return raw_data  # Return raw data if no schema is found
 
-        DynamicModel = get_pydantic_model(entity, schema)
+        dynamic_model = get_pydantic_model(entity, schema)
         try:
-            validated_model = DynamicModel(**raw_data)
-            return validated_model.model_dump()
+            validated_model = dynamic_model(**raw_data)
+            return raw_data | validated_model.model_dump()
         except ValidationError:
             return raw_data  # Return raw on validation failure
 
@@ -185,35 +222,74 @@ class RedisConnector(Connector):
         if not pk_val:
             raise ValueError("Primary key value not found in payload.")
 
-        key = f"{entity.capitalize()}:{pk_val}"
+        key = f"{entity.capitalize()}:{pk_val}:{self.get_data_type()}"
         str_payload = {k: str(v) for k, v in payload.items()}
-        await r.hset(key, mapping=str_payload)
+
+        data_type = self.get_data_type()
+        if data_type == "string":
+            await r.set(key, json.dumps(str_payload))
+        elif data_type == "json":
+            await r.json().set(key, "$", str_payload)
+        else:  # 'hash' is the default
+            await r.hset(key, mapping=str_payload)
+
         return {"status": "inserted", "key": key}
 
     async def update(
         self, entity: str, pk_col: str, pk_val: Any, payload: Dict[str, Any]
     ) -> int:
         r = self._get_client()
-        key = f"{entity.capitalize()}:{pk_val}"
+        key = f"{entity.capitalize()}:{pk_val}:{self.get_data_type()}"
         if not await r.exists(key):
             return 0
+
         str_payload = {k: str(v) for k, v in payload.items()}
-        await r.hset(key, mapping=str_payload)
+        logging.info(f"update-strategy-str_payload: {str_payload}")
+        data_type = self.get_data_type()
+
+        if data_type == "string" or data_type == "json":
+            # For string/JSON, we need to get, update, and set
+            if data_type == "string":
+                current_data_str = await r.get(key)
+                current_data = (
+                    json.loads(current_data_str) if current_data_str else {}
+                )  # noqa:F501
+            else:  # json
+                current_data = await r.json().get(key) or {}
+            logging.info(f"update-strategy-current_data: {current_data}")
+            current_data.update(str_payload)
+            logging.info(
+                f"update-strategy-current_data-updated: {current_data}"
+            )  # noqa:F501
+            if data_type == "string":
+                await r.set(key, json.dumps(current_data))
+            else:
+                await r.json().set(key, "$", current_data)
+        else:  # hash
+            await r.hset(key, mapping=str_payload)
         return 1
 
     async def delete(self, entity: str, pk_col: str, pk_val: Any) -> int:
         r = self._get_client()
-        key = f"{entity.capitalize()}:{pk_val}"
+        key = f"{entity.capitalize()}:{pk_val}:{self.get_data_type()}"
         return await r.delete(key)
 
     async def get_all(self, entity: str) -> List[Dict[str, Any]]:
         r = self._get_client()
-        keys = [key async for key in r.scan_iter(f"{entity.capitalize()}:*")]
+        keys = [
+            key
+            async for key in r.scan_iter(
+                f"{entity.capitalize()}:*:{self.get_data_type()}"
+            )
+        ]
         if not keys:
             return []
         pipe = r.pipeline()
         for key in keys:
-            pipe.hgetall(key)
+            if self.get_data_type() == "hash":
+                pipe.hgetall(key)
+            else:
+                pipe.get(key)
         results = await pipe.execute()
         return [dict(res) for res in results if res]
 
@@ -284,14 +360,17 @@ class RedisConnector(Connector):
 
     async def group_by(self, ast: exp.Select) -> List[Dict[str, Any]]:
         if self.spark is None:
-            self.spark = self._init_spark()
+            self._init_spark()
         if not self.spark:
             raise RuntimeError("PySpark is required for GROUP BY operations.")
 
         table_name = ast.find(exp.Table).name
         r = self._get_client()
         keys = [
-            key async for key in r.scan_iter(f"{table_name.capitalize()}:*")
+            key
+            async for key in r.scan_iter(
+                f"{table_name.capitalize()}:*:{self.get_data_type()}"
+            )
         ]  # noqa:F501
         if not keys:
             return []
@@ -306,8 +385,11 @@ class RedisConnector(Connector):
             "password": self._password,
         }
 
+        data_type = self.get_data_type()
+
         def fetch_redis_data(iterator):
             import redis
+            import json
 
             partition_keys = list(iterator)
             if not partition_keys:
@@ -315,8 +397,18 @@ class RedisConnector(Connector):
             r_sync = redis.Redis(**redis_config, decode_responses=True)
             pipe = r_sync.pipeline(transaction=False)
             for key in partition_keys:
-                pipe.hgetall(key)
-            return iter(pipe.execute())
+                if data_type == "hash":
+                    pipe.hgetall(key)
+                elif data_type == "string" or data_type == "json":
+                    pipe.get(key)
+
+            results = pipe.execute()
+
+            if data_type in ["string", "json"]:
+                # JSON strings need to be parsed
+                return [json.loads(res) for res in results if res]
+            else:
+                return iter(results)
 
         data_rdd = keys_rdd.mapPartitions(fetch_redis_data)
         if data_rdd.isEmpty():
@@ -427,6 +519,7 @@ class RedisConnector(Connector):
             logging.error(f"File not found: {file_path}")
             return 0
 
+        data_type = self.get_data_type()
         async with r.pipeline(transaction=False) as pipe:
             for payload in batch:
                 pk_val = (
@@ -434,9 +527,14 @@ class RedisConnector(Connector):
                     if isinstance(pk_info, list)
                     else payload[pk_info]
                 )
-                key = f"{table_name.capitalize()}:{pk_val}"
+                key = f"{table_name.capitalize()}:{pk_val}:{data_type}"
                 str_payload = {k: str(v) for k, v in payload.items()}
-                await pipe.hset(key, mapping=str_payload)
+                if data_type == "string":
+                    await pipe.set(key, json.dumps(str_payload))
+                elif data_type == "json":
+                    await pipe.json().set(key, "$", str_payload)
+                else:
+                    await pipe.hset(key, mapping=str_payload)
             await pipe.execute()
         return inserted_count
 

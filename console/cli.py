@@ -50,6 +50,23 @@ def engine(ctx, name):
     console.print(msg)
 
 
+@cli.command(name="redis-type")
+@click.argument("type_name", type=click.Choice(["string", "hash", "json"]))
+@click.pass_context
+def redis_type(ctx, type_name):
+    """
+    Sets the Redis data type strategy for the current session.
+
+    Example: redis-type json
+    """
+    state = ctx.obj
+    # Directly modify the connector's options for the session
+    state.client.rd._options["data_type"] = type_name
+    msg = "Redis data type strategy set to "
+    msg += f"[bold cyan]{type_name}[/bold cyan]."
+    console.print(msg)
+
+
 @cli.command()
 @click.pass_context
 async def ping(ctx):

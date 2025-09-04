@@ -4,9 +4,11 @@ import csv
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 import asyncpg
+
 from polyfuseql.catalogue.Catalogue import Catalogue
+from polyfuseql.config import settings
 from polyfuseql.connector.Connector import Connector
-from polyfuseql.utils.utils import _camelize_keys, env, _snake_case
+from polyfuseql.utils.utils import _camelize_keys, _snake_case
 from sqlglot import exp
 
 
@@ -20,17 +22,13 @@ class PostgresConnector(Connector):
     async def get_all(self, entity: str) -> List[Dict[str, Any]]:
         pass
 
-    def __init__(
-        self,
-        options: Optional[Dict] = None,
-        catalogue: Optional[Catalogue] = None,
-    ) -> None:
-        super().__init__(options, catalogue)
-        self._host = env("POSTGRES_HOST", "localhost")
-        self._port = int(env("POSTGRES_PORT", "5432"))
-        self._user = env("POSTGRES_USER", "tpch")
-        self._password = env("POSTGRES_PASSWORD", "tpch")
-        self._database = env("POSTGRES_DB", "tpch")
+    def __init__(self, catalogue: Optional[Catalogue] = None) -> None:
+        super().__init__(catalogue=catalogue)
+        self._host = settings.postgres_host
+        self._port = settings.postgres_port
+        self._user = settings.postgres_user
+        self._password = settings.postgres_password
+        self._database = settings.postgres_db
         self._connection: Optional[asyncpg.Connection] = None
 
     async def connect(self) -> None:

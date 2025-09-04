@@ -25,8 +25,9 @@ from pyspark.sql.types import (
 from sqlglot import exp
 
 from polyfuseql.catalogue.Catalogue import Catalogue
+from polyfuseql.config import settings
 from polyfuseql.connector.Connector import Connector
-from polyfuseql.utils.utils import _camelize_keys, env, get_pydantic_model
+from polyfuseql.utils.utils import _camelize_keys, get_pydantic_model
 
 
 async def _execute_batch_insert(
@@ -47,12 +48,8 @@ class Neo4jConnector(Connector):
     Uses the user-defined schema from the Catalogue.
     """
 
-    def __init__(
-        self,
-        options: Optional[Dict] = None,
-        catalogue: Optional[Catalogue] = None,
-    ) -> None:
-        super().__init__(options, catalogue)
+    def __init__(self, catalogue: Optional[Catalogue] = None) -> None:
+        super().__init__(catalogue=catalogue)
 
         logging.basicConfig(
             level=logging.INFO,
@@ -67,23 +64,15 @@ class Neo4jConnector(Connector):
             logging.warning(msg)
             active_session.stop()
 
-        host = env("NEO4J_HOST", "localhost")
-        port = env("NEO4J_PORT", "7687")
-        user = env("NEO4J_USER", "neo4j")
-        password = env("NEO4J_PASSWORD", "password")
-        self._uri = f"bolt://{host}:{port}"
-        self._auth = (user, password)
+        self._uri = f"bolt://{settings.neo4j_host}:{settings.neo4j_port}"
+        self._auth = (settings.neo4j_user, settings.neo4j_password)
         self._driver: Optional[AsyncDriver] = None
 
-        spark_master_url = "local[*]"
-
-        jar_path_str = os.environ.get(
-            "NEO4J_SPARK_JAR_PATH",
-            str(
-                Path(__file__).parent.parent.parent
-                / "jars"
-                / "neo4j-spark-connector-5.3.1-s_2.13.jar"
-            ),
+        spark_master_url = settings.spark_master_url
+        jar_path_str = settings.neo4j_spark_jar_path or str(
+            Path(__file__).parent.parent.parent
+            / "jars"
+            / "neo4j-spark-connector-5.3.1-s_2.13.jar"
         )
 
         jar_path = Path(jar_path_str)
@@ -94,31 +83,37 @@ class Neo4jConnector(Connector):
             raise FileNotFoundError(msg)
         logging.info(f"Found local JAR: {jar_path_str}")
 
-        submit_args = '--jars "'
-        submit_args += f"{jar_path_str}"
-        submit_args += '" pyspark-shell'
+        submit_args = f'--jars "{jar_path_str}" pyspark-shell'
         os.environ["PYSPARK_SUBMIT_ARGS"] = submit_args
 
         if "local" not in spark_master_url:
-            app_name = "Neo4jConnector-TPCH-Benchmark-"
-            app_name += "Server"
+            app_name = f"{settings.spark_app_name_prefix}-Server"
             builder = (
                 SparkSession.builder.appName(app_name)
                 .master(spark_master_url)
-                .config("spark.cores.max", "48")
-                .config("spark.driver.memory", "4g")
-                .config("spark.executor.memory", "3g")
-                .config("spark.sql.shuffle.partitions", "144")
-                .config("spark.network.timeout", "8000s")
-                .config("spark.executor.heartbeatInterval", "60s")
+                .config("spark.cores.max", settings.spark_cores_max)
+                .config("spark.driver.memory", settings.spark_driver_memory)
+                .config(
+                    "spark.executor.memory", settings.spark_executor_memory
+                )  # noqa:F501
+                .config(
+                    "spark.sql.shuffle.partitions",
+                    settings.spark_shuffle_partitions,
+                )
+                .config(
+                    "spark.network.timeout", settings.spark_network_timeout
+                )  # noqa:F501
+                .config(
+                    "spark.executor.heartbeatInterval",
+                    settings.spark_executor_heartbeat_interval,
+                )
             )
         else:
-            app_name = "Neo4jConnector-TPCH-Benchmark-"
-            app_name += "Local"
+            app_name = f"{settings.spark_app_name_prefix}-Local"
             builder = (
                 SparkSession.builder.appName(app_name)
                 .master(spark_master_url)
-                .config("spark.driver.memory", "4g")
+                .config("spark.driver.memory", settings.spark_driver_memory)
             )
 
         self.spark = builder.getOrCreate()
