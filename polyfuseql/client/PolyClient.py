@@ -79,12 +79,19 @@ class PolyClient:
         target_pk_col = primary_key_column
 
         if not target_engine or not target_pk_col:
+            logging.info("Primary key column not found.")
             schema = self._catalogue.get_schema(table_name)
             if schema:
+                msg = "Primary key column not found. "
+                msg += f"Using default schema : {schema}"
+                logging.info(msg)
                 if not target_engine:
                     target_engine = schema["backend"]
                 if not target_pk_col:
                     target_pk_col = schema["pk"]
+                msg = f"target_engine: {target_engine}, "
+                msg += f"target_pk_col: {target_pk_col}"
+                logging.info(msg)
 
         if isinstance(target_pk_col, list):
             raise NotImplementedError(

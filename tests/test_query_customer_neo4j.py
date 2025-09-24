@@ -7,6 +7,8 @@ from polyfuseql.client.PolyClient import PolyClient
 async def test_query_customer_neo4j():
     async with PolyClient() as c:
         rows = await c.execute(
-            "SELECT * FROM customer WHERE customerID = 'ALFKI'", engine="neo4j"
+            "SELECT * FROM customer WHERE customerID = 'ALFKI'",
+            engine="neo4j",
+            use_catalogue=False,
         )
         assert rows and rows[0]["companyName"] == "Alfreds Futterkiste"

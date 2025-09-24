@@ -28,7 +28,9 @@ async def test_delete_from_neo4j():
 
         # Act: Delete the node.
         delete_sql = f"DELETE FROM Person WHERE id = '{person_id}'"
-        delete_result = await client.execute(delete_sql, engine="neo4j")
+        delete_result = await client.execute(
+            delete_sql, engine="neo4j", use_catalogue=False
+        )
 
         # Assert: The connector should report 1 node deleted.
         assert delete_result["deleted_count"] == 1

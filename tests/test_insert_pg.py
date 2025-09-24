@@ -17,7 +17,9 @@ async def test_insert_postgres():
         sql = "INSERT INTO customers (customer_id, company_name) "
         sql += f"VALUES ('{customer_id}', '{company_name}')"  # noqa: F501
 
-        result = await client.execute(sql, engine="postgres")
+        result = await client.execute(
+            sql, engine="postgres", use_catalogue=False
+        )  # noqa
         print(result.keys())
         assert result["customerId"] == customer_id
         assert result["companyName"] == company_name

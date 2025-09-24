@@ -88,9 +88,10 @@ class RedisConnector(Connector):
         self, entity: str, pk_col: str, pk_val: Any
     ) -> Dict[str, Any]:  # noqa: E501
         r = self._get_client()
-        key = f"{entity.capitalize()}:{pk_val}:{self.get_data_type()}"
-
+        key = f"{entity.capitalize()}:{pk_val}"
+        logging.info("Getting data from Redis: %s", key)
         data_type = self.get_data_type()
+        logging.info("Data type: %s", data_type)
         raw_data = None
         if data_type == "string":
             raw_data_str = await r.get(key)
@@ -100,18 +101,20 @@ class RedisConnector(Connector):
             raw_data = await r.json().get(key)
         else:  # 'hash' is the default
             raw_data = await r.hgetall(key)
-
+        logging.info(f"Raw Data: {raw_data}")
         if not raw_data:
             return {}
 
         schema = self.catalogue.get_schema(entity)
+        logging.info("Schema: %s", schema)
         if not schema:
             return _camelize_keys(raw_data)
 
         DynamicModel = get_pydantic_model(entity, schema)
         try:
             # Pydantic expects camelCase keys
-            validated_model = DynamicModel(**_camelize_keys(raw_data))
+            validated_model = DynamicModel(**raw_data)
+            logging.info("Validated model: %s", validated_model.model_dump())
             return raw_data | validated_model.model_dump()
         except ValidationError:
             return _camelize_keys(raw_data)
@@ -121,8 +124,9 @@ class RedisConnector(Connector):
         schema = self.catalogue.get_schema(entity)
         if not schema:
             raise ValueError(f"No schema for table: {entity}")
-
+        logging.info(f"insert-schema: {schema}")
         pk_col = schema["pk"]
+        logging.info(f"insert-pk_col: {pk_col}")
         if isinstance(pk_col, list):
             pk_val = ":".join(str(payload.get(k)) for k in pk_col)
         else:
@@ -131,10 +135,13 @@ class RedisConnector(Connector):
         if not pk_val:
             raise ValueError("Primary key value not found in payload.")
 
-        key = f"{entity.capitalize()}:{pk_val}:{self.get_data_type()}"
+        key = f"{entity.capitalize()}:{pk_val}"
         str_payload = {k: str(v) for k, v in payload.items()}
-
         data_type = self.get_data_type()
+
+        logging.info(f"insert-key: {key}")
+        logging.info(f"insert-str_payload: {str_payload}")
+        logging.info(f"insert-data_type: {data_type}")
         if data_type == "string":
             await r.set(key, json.dumps(str_payload))
         elif data_type == "json":
@@ -175,7 +182,7 @@ class RedisConnector(Connector):
 
     async def delete(self, entity: str, pk_col: str, pk_val: Any) -> int:
         r = self._get_client()
-        key = f"{entity.capitalize()}:{pk_val}:{self.get_data_type()}"
+        key = f"{entity.capitalize()}:{pk_val}"
         return await r.delete(key)
 
     async def get_all(self, entity: str) -> List[Dict[str, Any]]:
@@ -430,7 +437,9 @@ class RedisConnector(Connector):
                     if isinstance(pk_info, list)
                     else payload[pk_info]
                 )
-                key = f"{table_name.capitalize()}:{pk_val}:{data_type}"
+                key = f"{table_name.capitalize()}:{pk_val}"
+                if self._options.get("include_data_type_in_pk", False):
+                    key += f":{data_type}"
                 str_payload = {k: str(v) for k, v in payload.items()}
                 if data_type == "string":
                     await pipe.set(key, json.dumps(str_payload))

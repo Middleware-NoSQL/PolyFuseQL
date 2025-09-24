@@ -42,7 +42,9 @@ async def test_bulk_insert_full_redis(table_order):
     """
     Tests bulk insertion of the full TPC-H dataset into Redis.
     """
-    async with PolyClient.PolyClient() as client:
+    async with PolyClient.PolyClient(
+        options={"include_data_type_in_pk": True}
+    ) as client:
         for table_name in table_order:
             file_path = DATA_DIR / f"{table_name}.tbl"
             assert file_path.exists(), f"Data file not found: {file_path}"

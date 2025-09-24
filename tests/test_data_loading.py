@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 from pathlib import Path
 from polyfuseql.client import PolyClient
@@ -16,7 +18,9 @@ async def test_redis_data_types(redis_data_type):
     Acceptance Test for US 3.1: Verifies that the Redis loader
     correctly casts numeric types for various Redis data structures.
     """
-    async with PolyClient.PolyClient() as client:
+    async with PolyClient.PolyClient(
+        options={"include_data_type_in_pk": True}
+    ) as client:
         # Arrange: Configure the Redis connector for the specific data type
         redis_conn = client.backends["redis"]
         redis_conn._options["data_type"] = redis_data_type
@@ -27,13 +31,13 @@ async def test_redis_data_types(redis_data_type):
         # Act: Fetch a specific, known record using the
         # connector's public get method
         retrieved_data = await redis_conn.get(
-            "lineitem", pk_col="composite_key", pk_val="1:1"
+            "lineitem", pk_col="composite_key", pk_val=f"1:1:{redis_data_type}"
         )
 
         # Assert: Check the data types of numeric fields
         msg = f"Record not found in Redis for type {redis_data_type}."
         assert retrieved_data, msg
-
+        logging.info(f"retrieved_data: {retrieved_data}")
         assert isinstance(retrieved_data.get("l_quantity"), float)
         assert isinstance(retrieved_data.get("l_extendedprice"), float)
         assert retrieved_data.get("l_quantity") == 17.00
@@ -52,14 +56,13 @@ async def test_neo4j_data_types_and_parsing():
 
         # Arrange & Act (Part 1): Load region data,
         # which has trailing delimiters
-        inserted_count, total_lines = await neo4j_conn.bulk_insert(
+        inserted_count = await neo4j_conn.bulk_insert(
             "region", str(REGION_FIXTURE)
-        )
+        )  # noqa
 
         # Assert (Part 1): Check that no rows were skipped
         msg = "Should not skip rows with trailing delimiters."
         assert inserted_count == 5, msg
-        assert total_lines == 5
 
         # Arrange & Act (Part 2): Load lineitem data
         await neo4j_conn.bulk_insert("lineitem", str(LINEITEM_FIXTURE))

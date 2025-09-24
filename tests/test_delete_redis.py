@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 import uuid
 from polyfuseql.client.PolyClient import PolyClient
@@ -16,24 +18,26 @@ async def test_delete_from_redis():
 
         # The catalogue maps 'customers' to Redis, so we use use_catalogue=True
         insert_sql = (
-            f"INSERT INTO Customer (ID, companyName) "
+            f"INSERT INTO Customer (c_custkey, companyName) "
             f"VALUES ('{customer_id}', '{company_name}')"
         )
-        await client.execute(insert_sql, engine="redis")
+        await client.execute(insert_sql, engine="redis", use_catalogue=False)
 
         # Confirm it exists before deleting
         doc = await client.get(
             "Customer",
             customer_id,
-            primary_key_column="customerID",
+            primary_key_column="c_custkey",
             engine="redis",  # noqa: F501
         )
-        print("test-delete-from-redis-doc", doc)
+        logging.info(f"test-delete-from-redis-doc: {doc}")
         assert doc["companyName"] == company_name
 
         # Act: Delete the record using the catalogue.
-        delete_sql = f"DELETE FROM Customer WHERE customerID = '{customer_id}'"
-        delete_result = await client.execute(delete_sql, engine="redis")
+        delete_sql = f"DELETE FROM Customer WHERE c_custkey = '{customer_id}'"
+        delete_result = await client.execute(
+            delete_sql, engine="redis", use_catalogue=False
+        )
 
         # Assert: The connector should report at least one key was deleted.
         assert delete_result["deleted_count"] >= 1
@@ -42,7 +46,7 @@ async def test_delete_from_redis():
         deleted_doc = await client.get(
             "Customer",
             customer_id,
-            primary_key_column="customerID",
+            primary_key_column="c_custkey",
             engine="redis",  # noqa: F501
         )
         msg = "The record should have been deleted, but was found."

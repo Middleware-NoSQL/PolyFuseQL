@@ -16,7 +16,8 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures"
 @pytest.mark.parametrize("table_name, expected_count", EXPECTED_COUNTS.items())
 async def test_bulk_insert_postgres(table_name, expected_count):
     """
-    Tests bulk insertion into PostgreSQL using the COPY command via the connector.
+    Tests bulk insertion into PostgreSQL
+    using the COPY command via the connector.
     """
     file_path = FIXTURE_DIR / f"{table_name}.tbl"
     assert file_path.exists(), f"Fixture file not found: {file_path}"
@@ -42,7 +43,9 @@ async def test_bulk_insert_redis(table_name, expected_count):
     file_path = FIXTURE_DIR / f"{table_name}.tbl"
     assert file_path.exists()
 
-    async with PolyClient.PolyClient() as client:
+    async with PolyClient.PolyClient(
+        options={"include_data_type_in_pk": True}
+    ) as client:
         # Load the data
         inserted_count = await client.bulk_load_table(
             table_name, str(file_path), "redis"
