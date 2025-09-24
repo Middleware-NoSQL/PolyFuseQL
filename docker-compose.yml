@@ -15,7 +15,7 @@ services:
     volumes:
       - ./docker/tpch-data:/data
     entrypoint: /bin/sh
-    command: -c "cp /usr/local/bin/dists.dss /data && cd /data && /usr/local/bin/dbgen -s 1 -f -v && chown ${UID:-1000}:${GID:-1000} ./*"
+    command: -c "cp /usr/local/bin/dists.dss /data && cd /data && /usr/local/bin/dbgen -s 0.1 -f -v && chown ${UID:-1000}:${GID:-1000} ./*"
 
   # ────────────── PostgreSQL ────────────── #
   postgres:

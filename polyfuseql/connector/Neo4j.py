@@ -2,32 +2,33 @@
 
 import csv
 import logging
-import os
 import sys
 from datetime import date
 from decimal import Decimal
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from neo4j import AsyncDriver, AsyncGraphDatabase, AsyncTransaction
 from neo4j import time as neo_time
 from pydantic import ValidationError
-from pyspark.sql import SparkSession
-from pyspark.sql import functions as F
-from pyspark.sql.types import (
-    DateType,
-    DecimalType,
-    DoubleType,
-    StringType,
-    StructField,
-    StructType,
-)
 from sqlglot import exp
 
 from polyfuseql.catalogue.Catalogue import Catalogue
-from polyfuseql.config import settings
 from polyfuseql.connector.Connector import Connector
+from polyfuseql.utils.spark_manager import get_spark_session
 from polyfuseql.utils.utils import _camelize_keys, get_pydantic_model
+
+try:
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import (
+        DateType,
+        DecimalType,
+        DoubleType,
+        StringType,
+        StructField,
+        StructType,
+    )
+except ImportError:
+    pass
 
 
 async def _execute_batch_insert(
@@ -48,8 +49,12 @@ class Neo4jConnector(Connector):
     Uses the user-defined schema from the Catalogue.
     """
 
-    def __init__(self, catalogue: Optional[Catalogue] = None) -> None:
-        super().__init__(catalogue=catalogue)
+    def __init__(
+        self,
+        catalogue: Optional[Catalogue] = None,
+        options: Optional[Dict] = None,
+    ) -> None:
+        super().__init__(options=options, catalogue=catalogue)
 
         logging.basicConfig(
             level=logging.INFO,
@@ -57,72 +62,11 @@ class Neo4jConnector(Connector):
             stream=sys.stdout,
         )
 
-        active_session = SparkSession.getActiveSession()
-        if active_session:
-            msg = "An existing Spark session was found. "
-            msg += "Stopping it to apply new configurations."
-            logging.warning(msg)
-            active_session.stop()
+        from polyfuseql.config import settings
 
-        self._uri = f"bolt://{settings.neo4j_host}:{settings.neo4j_port}"
+        self._uri = f"bolt://{settings.neo4j_host}:" f"{settings.neo4j_port}"
         self._auth = (settings.neo4j_user, settings.neo4j_password)
         self._driver: Optional[AsyncDriver] = None
-
-        spark_master_url = settings.spark_master_url
-        jar_path_str = settings.neo4j_spark_jar_path or str(
-            Path(__file__).parent.parent.parent
-            / "jars"
-            / "neo4j-spark-connector-5.3.1-s_2.13.jar"
-        )
-
-        jar_path = Path(jar_path_str)
-        if not jar_path.exists():
-            msg = f"Neo4j Spark connector JAR not found at: {jar_path}\n "
-            msg += "Please download it from Maven Central "
-            msg += "and place it in the 'jars' directory."
-            raise FileNotFoundError(msg)
-        logging.info(f"Found local JAR: {jar_path_str}")
-
-        submit_args = f'--jars "{jar_path_str}" pyspark-shell'
-        os.environ["PYSPARK_SUBMIT_ARGS"] = submit_args
-
-        if "local" not in spark_master_url:
-            app_name = f"{settings.spark_app_name_prefix}-Server"
-            builder = (
-                SparkSession.builder.appName(app_name)
-                .master(spark_master_url)
-                .config("spark.cores.max", settings.spark_cores_max)
-                .config("spark.driver.memory", settings.spark_driver_memory)
-                .config(
-                    "spark.executor.memory", settings.spark_executor_memory
-                )  # noqa:F501
-                .config(
-                    "spark.sql.shuffle.partitions",
-                    settings.spark_shuffle_partitions,
-                )
-                .config(
-                    "spark.network.timeout", settings.spark_network_timeout
-                )  # noqa:F501
-                .config(
-                    "spark.executor.heartbeatInterval",
-                    settings.spark_executor_heartbeat_interval,
-                )
-            )
-        else:
-            app_name = f"{settings.spark_app_name_prefix}-Local"
-            builder = (
-                SparkSession.builder.appName(app_name)
-                .master(spark_master_url)
-                .config("spark.driver.memory", settings.spark_driver_memory)
-            )
-
-        self.spark = builder.getOrCreate()
-        msg = "Spark session initialized and connected to master: "
-        msg += f"{self.spark.sparkContext.master}"
-        logging.info(msg)
-        msg = "Spark UI available at: "
-        msg += f"{self.spark.sparkContext.uiWebUrl}"
-        logging.info(msg)
 
     async def connect(self) -> None:
         if not self._driver:
@@ -137,9 +81,6 @@ class Neo4jConnector(Connector):
             await self._driver.close()
             self._driver = None
             logging.info("Neo4j driver closed.")
-        if self.spark:
-            self.spark.stop()
-            logging.info("Spark session stopped.")
 
     def _get_driver(self) -> AsyncDriver:
         if not self._driver:
@@ -255,6 +196,12 @@ class Neo4jConnector(Connector):
         raise NotImplementedError(msg)
 
     async def group_by(self, ast: exp.Select) -> List[Dict[str, Any]]:
+        spark = get_spark_session()
+        if not spark:
+            msg = "PySpark is required for GROUP BY operations "
+            msg += "but is not available."
+            raise RuntimeError(msg)
+
         table_name = ast.find(exp.Table).name
         label = table_name.capitalize()
         spark_schema = self._get_spark_schema(table_name)
@@ -289,7 +236,7 @@ class Neo4jConnector(Connector):
         )  # noqa:F501
 
         df = (
-            self.spark.read.format("org.neo4j.spark.DataSource")
+            spark.read.format("org.neo4j.spark.DataSource")
             .option("url", self._uri)
             .option("authentication.type", "basic")
             .option("authentication.basic.username", self._auth[0])
@@ -348,6 +295,12 @@ class Neo4jConnector(Connector):
         return [_camelize_keys(row) for row in results]
 
     async def aggregate(self, ast: exp.Select) -> List[Dict[str, Any]]:
+        spark = get_spark_session()
+        if not spark:
+            msg = "PySpark is required for aggregate operations "
+            msg += "but is not available."
+            raise RuntimeError(msg)
+
         table_name = ast.find(exp.Table).name
         label = table_name.capitalize()
         spark_schema = self._get_spark_schema(table_name)
@@ -370,7 +323,7 @@ class Neo4jConnector(Connector):
         cypher_query = msg
 
         df = (
-            self.spark.read.format("org.neo4j.spark.DataSource")
+            spark.read.format("org.neo4j.spark.DataSource")
             .option("url", self._uri)
             .option("authentication.type", "basic")
             .option("authentication.basic.username", self._auth[0])
@@ -470,7 +423,7 @@ class Neo4jConnector(Connector):
                     if len(batch) >= batch_size:
                         async with driver.session() as s:
                             nodes_created = await s.execute_write(
-                                _execute_batch_insert, cypher_query, batch
+                                _execute_batch_insert, cypher_query, batch  # noqa
                             )
                             total_inserted += nodes_created
                         batch = []
@@ -489,7 +442,7 @@ class Neo4jConnector(Connector):
             raise
         return total_inserted
 
-    def _get_spark_schema(self, table_name: str) -> StructType:
+    def _get_spark_schema(self, table_name: str) -> "StructType":
         sch_def = self.catalogue.get_schema(table_name)
         if not sch_def:
             msg = "No schema definition found for table: "
@@ -500,7 +453,9 @@ class Neo4jConnector(Connector):
             if c_type_str == "date":
                 fields.append(StructField(c_name, DateType(), True))
             elif "decimal" in c_type_str:
-                fields.append(StructField(c_name, DecimalType(38, 10), True))
+                fields.append(
+                    StructField(c_name, DecimalType(38, 10), True)
+                )  # noqa:F501
             else:
                 fields.append(StructField(c_name, StringType(), True))
         return StructType(fields)
@@ -533,7 +488,7 @@ class Neo4jConnector(Connector):
             return self._translate_expression_to_spark(expr.this)
         if (
             isinstance(expr, exp.Cast)
-            and expr.to.this == exp.DataType.Type.DATE  # noqa:F501
+            and expr.to.this == exp.DataType.Type.DATE  # noqa: E501
         ):  # noqa:F501
             return F.to_date(self._translate_expression_to_spark(expr.this))
         raise NotImplementedError(f"Unsupported expression type: {type(expr)}")
