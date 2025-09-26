@@ -155,7 +155,9 @@ class RedisConnector(Connector):
         self, entity: str, pk_col: str, pk_val: Any, payload: Dict[str, Any]
     ) -> int:
         r = self._get_client()
-        key = f"{entity.capitalize()}:{pk_val}:{self.get_data_type()}"
+        key = f"{entity.capitalize()}:{pk_val}"
+        if self._options.get("include_data_type_in_pk", False):
+            key += f":{self.get_data_type()}"
         if not await r.exists(key):
             return 0
 
@@ -283,6 +285,8 @@ class RedisConnector(Connector):
             key
             async for key in r.scan_iter(
                 f"{table_name.capitalize()}:*:{self.get_data_type()}"
+                if self._options.get("include_data_type_in_pk", False)
+                else f"{table_name.capitalize()}:*"
             )
         ]
         if not keys:
