@@ -1,17 +1,19 @@
 # docker-compose.yml – TPC-H Benchmark Stack (Production Version)
-# This version integrates all corrections for data generation and database services.
+# This version is modified to run safely on a host with existing services
+# by using unique container names and remapped ports.
 
 volumes:
-  postgres-data:
-  redis-data:
-  neo4j-data:
+  polyfuseql-postgres-data:
+  polyfuseql-redis-data:
+  polyfuseql-neo4j-data:
+  polyfuseql-mongo-data:
+  polyfuseql-cassandra-data:
 
 services:
   # ────────────── TPC-H Data Generator (DBGEN) ────────────── #
   dbgen:
     build: ./docker/dbgen
-    container_name: tpch_dbgen
-    # This service runs as root to create files, then changes ownership.
+    container_name: polyfuseql_tpch_dbgen # CHANGED: Unique container name
     volumes:
       - ./docker/tpch-data:/data
     entrypoint: /bin/sh
@@ -20,18 +22,18 @@ services:
   # ────────────── PostgreSQL ────────────── #
   postgres:
     image: postgres:16-alpine
-    container_name: pg_tpch
+    container_name: polyfuseql_pg_tpch # CHANGED: Unique container name
     environment:
       POSTGRES_DB: tpch
       POSTGRES_USER: tpch
       POSTGRES_PASSWORD: tpch
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - polyfuseql-postgres-data:/var/lib/postgresql/data
       - ./docker/postgres/init:/docker-entrypoint-initdb.d
       - ./docker/tpch-data:/tpch-data:ro
       - ./tests/fixtures:/test-data:ro
     ports:
-      - "5432:5432"
+      - "5432:5432" # Unchanged, no conflict
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tpch -d tpch && psql -U tpch -d tpch -c 'SELECT 1 FROM region LIMIT 1'"]
       interval: 5s
@@ -44,17 +46,12 @@ services:
   # ────────────── Redis ────────────── #
   redis:
     image: redis/redis-stack:latest
-    container_name: redis_kv
-    command:
-      - redis-stack-server
-      - --requirepass
-      - tpch
-      - --protected-mode
-      - "no"
+    container_name: polyfuseql_redis_kv # CHANGED: Unique container name
+    command: ["redis-stack-server", "--requirepass", "tpch", "--protected-mode", "no"]
     volumes:
-      - redis-data:/data
+      - polyfuseql-redis-data:/data
     ports:
-      - "6379:6379"
+      - "6379:6379" # Unchanged, no conflict
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "tpch", "ping"]
       interval: 5s
@@ -63,7 +60,7 @@ services:
   # ────────────── Neo4j ────────────── #
   neo4j:
     image: neo4j:5-community
-    container_name: neo4j_graph_test
+    container_name: polyfuseql_neo4j_graph # CHANGED: Unique container name
     user: "${UID:-1000}:${GID:-1000}"
     environment:
       NEO4J_AUTH: neo4j/password
@@ -71,20 +68,12 @@ services:
       NEO4J_apoc_import_file_enabled: "true"
       NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
       NEO4J_server_directories_import: "/var/lib/neo4j/import"
-
-      # --- MEMORY CONFIGURATION FIX ---
-      # Corrected environment variable names based on official Neo4j 5.x documentation.
-      # Note the double underscores for settings that contain an underscore, e.g., initial_size -> initial__size.
-      #NEO4J_server_memory_heap_initial__size: 32G
-      #NEO4J_server_memory_heap_max__size: 32G
-      #NEO4J_dbms_memory_transaction_total_max: 34G
-
     volumes:
       - ./docker/tpch-data:/var/lib/neo4j/import/tpch-data:ro
       - ./tests/fixtures:/var/lib/neo4j/import/fixtures:ro
     ports:
-      - "7687:7687"
-      - "7474:7474"
+      - "7687:7687" # Unchanged, no conflict
+      - "7474:7474" # Unchanged, no conflict
     healthcheck:
       test: [ "CMD-SHELL", "cypher-shell -u neo4j -p password 'RETURN 1' || exit 1" ]
       interval: 10s
@@ -93,3 +82,66 @@ services:
     depends_on:
       dbgen:
         condition: service_completed_successfully
+
+  # ────────────── MongoDB ────────────── #
+  mongodb:
+    image: mongo:latest
+    container_name: polyfuseql_mongodb # CHANGED: Unique container name
+    ports:
+      - "27018:27017" # CHANGED: Host port remapped to avoid conflict with existing 27017
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=root
+      - MONGO_INITDB_ROOT_PASSWORD=example
+    volumes:
+      - polyfuseql-mongo-data:/data/db
+    healthcheck:
+      test: "mongosh --port 27017 --username root --password example --eval 'quit(db.runCommand({ ping: 1 }).ok ? 0 : 1)'"
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ────────────── Cassandra ────────────── #
+  cassandra:
+    image: cassandra:latest
+    container_name: polyfuseql_cassandra # CHANGED: Unique container name
+    ports:
+      - "9043:9042" # CHANGED: Host port remapped to avoid conflict with existing 9042
+    environment:
+      - CASSANDRA_CLUSTER_NAME=PolyFuseCluster
+    volumes:
+      - polyfuseql-cassandra-data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'describe keyspaces'"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  # ─────────── Translator Services ─────────── #
+  mongo-translator-api:
+    image: python:3.11-slim
+    container_name: polyfuseql_mongo_translator # CHANGED: Unique container name
+    command: >
+      bash -c "apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/* &&
+             git clone https://github.com/Middleware-NoSQL/Traductor-SQL-NOSQL.git /app &&
+             cd /app/Backend &&
+             pip install --no-cache-dir -r requirements.txt &&
+             gunicorn -w 4 -b 0.0.0.0:5000 main:app"
+    ports:
+      - "5101:5000" # CHANGED: Host port remapped to avoid conflict with Grafana on 5000
+    working_dir: /app
+
+  cassandra-translator-api:
+    image: node:20-alpine
+    container_name: polyfuseql_cassandra_translator # CHANGED: Unique container name
+    command: >
+      sh -c "apk add --no-cache git &&
+             git clone https://github.com/andr3slelouch/SQL-to-CQL.git /app &&
+             cd /app/translate-service &&
+             npm install &&
+             npm run start:prod"
+    ports:
+      - "3101:3000" # CHANGED: Host port remapped for consistency
+    working_dir: /app
+

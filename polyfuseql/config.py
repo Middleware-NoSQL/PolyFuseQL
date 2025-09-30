@@ -9,9 +9,55 @@ single source of truth throughout the application.
 """
 
 from pathlib import Path
-from typing import Optional, Literal
-
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class PostgresSettings(BaseModel):
+    user: str = "postgres"
+    password: str = "password"
+    host: str = "postgres"
+    port: int = 5432
+    db: str = "tpch"
+
+
+class RedisSettings(BaseModel):
+    host: str = "redis"
+    port: int = 6379
+    db: int = 0
+
+
+class Neo4jSettings(BaseModel):
+    uri: str = "bolt://neo4j:7687"
+    user: str = "neo4j"
+    password: str = "password"
+
+
+class MongoDbSettings(BaseModel):
+    user: str = "root"
+    password: str = "example"
+    host: str = "mongodb"
+    port: int = 27017
+    db: str = "mydatabase"
+
+
+class CassandraSettings(BaseModel):
+    user: str | None = None
+    password: str | None = None
+    host: str = "cassandra"
+    port: int = 9042
+    keyspace: str = "mykeyspace"
+
+
+class SparkSettings(BaseModel):
+    master_url: str = "local[*]"
+    app_name_prefix: str = "PolyFuseQL-TPCH-Benchmark"
+    driver_memory: str = "4g"
+    executor_memory: str = "3g"
+    cores_max: str = "48"
+    shuffle_partitions: str = "144"
+    network_timeout: str = "8000s"
+    executor_heartbeat_interval: str = "60s"
 
 
 class AppSettings(BaseSettings):
@@ -20,43 +66,19 @@ class AppSettings(BaseSettings):
     from environment variables or a .env file.
     """
 
-    # Pydantic settings configuration
     model_config = SettingsConfigDict(
-        env_file=".env", case_sensitive=False, extra="ignore"
+        env_nested_delimiter="__", env_file=".env", extra="ignore"
     )
 
-    # PostgreSQL Settings
-    postgres_host: str = "localhost"
-    postgres_port: int = 5432
-    postgres_user: str = "tpch"
-    postgres_password: str = "tpch"
-    postgres_db: str = "tpch"
+    postgres: PostgresSettings = Field(default_factory=PostgresSettings)
+    redis: RedisSettings = Field(default_factory=RedisSettings)
+    neo4j: Neo4jSettings = Field(default_factory=Neo4jSettings)
+    mongodb: MongoDbSettings = Field(default_factory=MongoDbSettings)
+    cassandra: CassandraSettings = Field(default_factory=CassandraSettings)
+    spark: SparkSettings = Field(default_factory=SparkSettings)
 
-    # Redis Settings
-    redis_host: str = "localhost"
-    redis_port: int = 6379
-    redis_password: str = "tpch"
-    # The default data type strategy for Redis. Can be overridden at runtime.
-    redis_data_type: Literal["hash", "string", "json"] = "hash"
-
-    # Neo4j Settings
-    neo4j_host: str = "localhost"
-    neo4j_port: int = 7687
-    neo4j_user: str = "neo4j"
-    neo4j_password: str = "password"
-    neo4j_spark_jar_path: Optional[str] = (
-        "./jars/neo4j-spark-connector-5.3.1-s_2.13.jar"
-    )
-
-    # Spark Settings
-    spark_master_url: str = "local[*]"
-    spark_app_name_prefix: str = "PolyFuseQL-TPCH-Benchmark"
-    spark_driver_memory: str = "4g"
-    spark_executor_memory: str = "3g"
-    spark_cores_max: str = "48"
-    spark_shuffle_partitions: str = "144"
-    spark_network_timeout: str = "8000s"
-    spark_executor_heartbeat_interval: str = "60s"
+    mongo_translator_url: str = "http://mongo-translator-api:5000"
+    cassandra_translator_url: str = "http://cassandra-translator-api:3000"
 
     # Application-specific Settings
     polyfuseql_schema_path: Path = Path("schemas.json")
