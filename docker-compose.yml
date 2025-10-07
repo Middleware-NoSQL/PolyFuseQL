@@ -120,17 +120,30 @@ services:
 
   # ─────────── Translator Services ─────────── #
   mongo-translator-api:
-    image: python:3.11-slim
+    # MODIFIED: Build from the new local Dockerfile for speed and reliability.
+    build:
+      context: ./docker/mongo-translator
     container_name: polyfuseql_mongo_translator # CHANGED: Unique container name
-    command: >
-      bash -c "apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/* &&
-             git clone https://github.com/Middleware-NoSQL/Traductor-SQL-NOSQL.git /app &&
-             cd /app/Backend &&
-             pip install --no-cache-dir -r requirements.txt &&
-             gunicorn -w 4 -b 0.0.0.0:5000 main:app"
     ports:
       - "5101:5000" # CHANGED: Host port remapped to avoid conflict with Grafana on 5000
-    working_dir: /app
+    # MODIFIED: Added environment variables required by the translator service.
+    # It connects to the 'mongodb' service on the internal Docker network.
+    environment:
+      - MONGODB_URI=mongodb://root:example@mongodb:27017/
+      - AUTH_DB_NAME=sql_middleware_auth
+      - JWT_SECRET_KEY=your-super-secret-key-for-docker
+      - PORT=5000
+      - DEBUG=False
+    # MODIFIED: Ensures this service only starts after the database is ready.
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:5000/health" ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   cassandra-translator-api:
     image: node:20-alpine

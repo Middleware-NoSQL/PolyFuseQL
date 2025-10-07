@@ -24,11 +24,11 @@ class PostgresConnector(Connector):
 
     def __init__(self, catalogue: Optional[Catalogue] = None) -> None:
         super().__init__(catalogue=catalogue)
-        self._host = settings.postgres_host
-        self._port = settings.postgres_port
-        self._user = settings.postgres_user
-        self._password = settings.postgres_password
-        self._database = settings.postgres_db
+        self._host = settings.postgres.host
+        self._port = settings.postgres.port
+        self._user = settings.postgres.user
+        self._password = settings.postgres.password
+        self._database = settings.postgres.db
         self._connection: Optional[asyncpg.Connection] = None
 
     async def connect(self) -> None:

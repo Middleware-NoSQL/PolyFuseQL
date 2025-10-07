@@ -27,8 +27,9 @@ class CassandraConnector(Connector):
         settings: AppSettings,
         options: Optional[Dict] = None,
         catalogue: Optional[Catalogue] = None,
+        is_local_implementation: bool = False,
     ):
-        super().__init__(options, catalogue)
+        super().__init__(options, catalogue, is_local_implementation)
         self.settings = settings.cassandra
         self.translator_url = settings.cassandra_translator_url
         self._cluster: Cluster | None = None

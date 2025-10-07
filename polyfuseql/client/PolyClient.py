@@ -40,12 +40,20 @@ class PolyClient:
             "redis", self.catalogue, self.options
         )
         self.nj = ConnectorFactory.create_connector("neo4j", self.catalogue)
+        self.mongo = ConnectorFactory.create_connector(
+            "mongodb", self.catalogue
+        )  # noqa:E501
+        self.cassandra = ConnectorFactory.create_connector(
+            "cassandra", self.catalogue
+        )  # noqa:E501
         self._catalogue = self.catalogue  # Keep for backward compatibility
         self.backends = {
             "postgres": self.pg,
             "pg": self.pg,
             "redis": self.rd,
             "neo4j": self.nj,
+            "mongodb": self.mongo,
+            "cassandra": self.cassandra,
         }
         self.query_strategies = {
             exp.Select: SelectStrategy(),
@@ -58,14 +66,20 @@ class PolyClient:
     async def __aenter__(self):
         """Establishes connections when entering an `async with` block."""
         await asyncio.gather(
-            self.pg.connect(), self.rd.connect(), self.nj.connect()
+            self.pg.connect(),
+            self.rd.connect(),
+            self.nj.connect(),
+            self.mongo.connect(),
         )  # noqa:F501
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Closes connections when exiting an `async with` block."""
         await asyncio.gather(
-            self.pg.disconnect(), self.rd.disconnect(), self.nj.disconnect()
+            self.pg.disconnect(),
+            self.rd.disconnect(),
+            self.nj.disconnect(),
+            self.mongo.disconnect(),
         )
 
     async def get(
@@ -119,7 +133,9 @@ class PolyClient:
         logging.info(f"Primary key: {target_pk_col}")
         logging.info(f"Primary key value: {primary_key_value}")
         return await conn.get(
-            table_name, str(target_pk_col), primary_key_value
+            entity=table_name,
+            pk_col=str(target_pk_col),
+            pk_val=primary_key_value,  # noqa:E501
         )  # noqa:F501
 
     async def execute(

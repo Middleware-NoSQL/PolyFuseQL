@@ -64,8 +64,8 @@ class Neo4jConnector(Connector):
 
         from polyfuseql.config import settings
 
-        self._uri = f"bolt://{settings.neo4j_host}:" f"{settings.neo4j_port}"
-        self._auth = (settings.neo4j_user, settings.neo4j_password)
+        self._uri = f"bolt://{settings.neo4j.host}:" f"{settings.neo4j.port}"
+        self._auth = (settings.neo4j.user, settings.neo4j.password)
         self._driver: Optional[AsyncDriver] = None
 
     async def connect(self) -> None:

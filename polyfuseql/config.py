@@ -8,15 +8,16 @@ It loads settings from environment variables and a .env file, providing a
 single source of truth throughout the application.
 """
 
+import logging
 from pathlib import Path
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class PostgresSettings(BaseModel):
-    user: str = "postgres"
-    password: str = "password"
-    host: str = "postgres"
+    user: str = "tpch"
+    password: str = "tpch"
+    host: str = "localhost"
     port: int = 5432
     db: str = "tpch"
 
@@ -25,19 +26,22 @@ class RedisSettings(BaseModel):
     host: str = "redis"
     port: int = 6379
     db: int = 0
+    password: str = "tpch"
 
 
 class Neo4jSettings(BaseModel):
     uri: str = "bolt://neo4j:7687"
     user: str = "neo4j"
     password: str = "password"
+    host: str = "localhost"
+    port: int = 7687
 
 
 class MongoDbSettings(BaseModel):
     user: str = "root"
     password: str = "example"
-    host: str = "mongodb"
-    port: int = 27017
+    host: str = "localhost"
+    port: int = 27018
     db: str = "mydatabase"
 
 
@@ -74,6 +78,7 @@ class AppSettings(BaseSettings):
     redis: RedisSettings = Field(default_factory=RedisSettings)
     neo4j: Neo4jSettings = Field(default_factory=Neo4jSettings)
     mongodb: MongoDbSettings = Field(default_factory=MongoDbSettings)
+    logging.info(f"mongodb {mongodb}")
     cassandra: CassandraSettings = Field(default_factory=CassandraSettings)
     spark: SparkSettings = Field(default_factory=SparkSettings)
 

@@ -39,9 +39,9 @@ class RedisConnector(Connector):
         options: Optional[Dict] = None,
     ) -> None:
         super().__init__(options=options, catalogue=catalogue)
-        self._host = settings.redis_host
-        self._port = settings.redis_port
-        self._password = settings.redis_password
+        self._host = settings.redis.host
+        self._port = settings.redis.port
+        self._password = settings.redis.password
         self._client: Optional[aioredis.Redis] = None
 
     def get_data_type(self) -> str:

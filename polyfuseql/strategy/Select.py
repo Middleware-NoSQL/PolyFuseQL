@@ -1,3 +1,5 @@
+import logging
+
 from polyfuseql.strategy.Query import QueryStrategy
 from sqlglot import exp
 
@@ -5,8 +7,13 @@ from sqlglot import exp
 class SelectStrategy(QueryStrategy):
     async def execute(self, client, ast, backend, use_catalogue):
         conn = client.backends.get(backend)
+
         if not conn:
             raise ValueError(f"Connector for backend '{backend}' not found.")
+
+        if not conn.is_local_implementation:
+            result = await conn.query(ast.sql())
+            return result if result else []
 
         is_agg = any(
             isinstance(e, exp.AggFunc)
@@ -29,10 +36,14 @@ class SelectStrategy(QueryStrategy):
         else:
             where_expr = None
 
+        physical_table = ast.find(exp.Table).name
+
         if not where_expr:
-            raise NotImplementedError(
-                "SELECT queries without a WHERE clause must be aggregations."
+            logging.warning(
+                "SELECT queries without a WHERE clause can be heavy to execute and load take caution"  # noqa:E501
             )
+            result = await conn.get_all(physical_table)
+            return result if result else []
 
         if use_catalogue:
             catalogue_entry = client._catalogue.get(table_name.lower())
@@ -58,6 +69,5 @@ class SelectStrategy(QueryStrategy):
             )
         )
 
-        physical_table = ast.find(exp.Table).name
         result = await conn.get(physical_table, pk_col, pk_val)
         return [result] if result else []

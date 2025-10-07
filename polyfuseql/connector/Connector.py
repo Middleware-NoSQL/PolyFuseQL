@@ -10,9 +10,11 @@ class Connector(ABC):
         self,
         options: Optional[Dict] = None,
         catalogue: Optional[Catalogue] = None,
+        is_local_implementation: bool = True,
     ) -> None:
         self._options = options or {}
         self.catalogue = catalogue or Catalogue()
+        self.is_local_implementation = is_local_implementation
 
     @abstractmethod
     async def connect(self):
