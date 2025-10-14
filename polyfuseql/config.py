@@ -45,12 +45,25 @@ class MongoDbSettings(BaseModel):
     db: str = "mydatabase"
 
 
+class CassandraAuthSettings(BaseModel):
+    """
+    Defines settings for connecting to the separate auth microservice.
+    The port is based on the host mapping from 'docker ps' (3001->3001).
+    """
+
+    url: str = "http://localhost:3001"
+    cedula: str = "admin"
+    nombre: str = "Admin User"
+    password: str = "admin123"
+
+
 class CassandraSettings(BaseModel):
-    user: str | None = None
-    password: str | None = None
-    host: str = "cassandra"
-    port: int = 9042
+    user: str | None = "cassandra"
+    password: str | None = "cassandra"
+    host: str = "localhost"
+    port: int = 9043
     keyspace: str = "mykeyspace"
+    auth: CassandraAuthSettings = Field(default_factory=CassandraAuthSettings)
 
 
 class SparkSettings(BaseModel):
@@ -83,7 +96,7 @@ class AppSettings(BaseSettings):
     spark: SparkSettings = Field(default_factory=SparkSettings)
 
     mongo_translator_url: str = "http://mongo-translator-api:5000"
-    cassandra_translator_url: str = "http://cassandra-translator-api:3000"
+    cassandra_translator_url: str = "http://localhost:3101"
 
     # Application-specific Settings
     polyfuseql_schema_path: Path = Path("schemas.json")

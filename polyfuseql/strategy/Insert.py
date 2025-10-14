@@ -43,7 +43,27 @@ class InsertStrategy(QueryStrategy):
 
         # Assuming a single row insert for simplicity
         expressions = values_expression.expressions[0]
-        values = [val.this for val in expressions.expressions]
+        values = []
+        for lit_expr in expressions.expressions:
+            if lit_expr.is_string:
+                values.append(lit_expr.this)
+            else:
+                val_str = lit_expr.this
+                # Handle NULL and boolean literals
+                if val_str.lower() == "null":
+                    values.append(None)
+                elif val_str.lower() in ("true", "false"):
+                    values.append(val_str.lower() == "true")
+                else:
+                    # Handle numeric literals
+                    try:
+                        if "." in val_str:
+                            values.append(float(val_str))
+                        else:
+                            values.append(int(val_str))
+                    except (ValueError, TypeError):
+                        # Fallback for any other unhandled literal type
+                        values.append(val_str)
 
         payload = dict(zip(columns, values))
         conn = client.backends[backend]

@@ -95,7 +95,7 @@ class MongoDbConnector(Connector):
     async def disconnect(self):
         """Closes all connections."""
         if self._client:
-            self._client.close()
+            await self._client.close()
             self._client = None
             self._db = None
             logger.info("MongoDB connection closed.")
@@ -151,7 +151,7 @@ class MongoDbConnector(Connector):
                 return await response.json()
         except aiohttp.ClientResponseError as e:
             logger.error(
-                f"Error from translation service: {e.status}, {e.message}, {await e.text()}"  # noqa:E501
+                f"Error from translation service: {e.status}, {e.message}"  # noqa:E501
             )
             # Return empty list for testability on certain errors
             if e.status == 400:

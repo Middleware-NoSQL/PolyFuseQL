@@ -1,68 +1,63 @@
+import logging
+
 import pytest
 import uuid
-from cassandra.cluster import Cluster
-from polyfuseql.client import PolyClient
-from polyfuseql.config import settings
+from polyfuseql.client.PolyClient import PolyClient
 
-# --- Test Data and Schema ---
-TEST_KEYSPACE = "mykeyspace"  # Must match what the translator expects
+# --- Test Constants ---
+TEST_KEYSPACE = "mykeyspace"
 TEST_TABLE = "test_integration_users"
 
 
-def setup_cassandra_schema():
-    """
-    Connects directly to Cassandra to create the necessary keyspace and table
-    for testing. This is a blocking operation run once per module.
-    """
-    try:
-        cluster = Cluster(
-            [settings.cassandra.host], port=settings.cassandra.port
-        )  # noqa:E501
-        session = cluster.connect()
-        session.execute(
-            f"""
-            CREATE KEYSPACE IF NOT EXISTS {TEST_KEYSPACE}
-            WITH REPLICATION = {{ 'class': 'SimpleStrategy', 'replication_factor': 1 }}
-            """  # noqa:E501
-        )
-        session.set_keyspace(TEST_KEYSPACE)
-        session.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {TEST_TABLE} (
-                user_id int PRIMARY KEY,
-                name text,
-                email text,
-                age int
-            )
-            """
-        )
-        # Clean the table before tests start
-        session.execute(f"TRUNCATE TABLE {TEST_TABLE}")
-        cluster.shutdown()
-    except Exception as e:
-        pytest.fail(f"Failed to set up Cassandra schema: {e}")
-
-
 @pytest.fixture(scope="module", autouse=True)
-def setup_database():
-    """Module-level fixture to set up the database schema once."""
-    setup_cassandra_schema()
+async def setup_test_schema():
+    """
+    Pytest fixture to ensure the required keyspace and table exist before
+    any tests in this module are run. It performs setup by calling the
+    translator API itself, guaranteeing that the schema is created in the
+    correct database instance that the service is connected to.
+    """
+    print("\n--- [Module Setup] Ensuring Cassandra schema exists via API ---")
+    # create_keyspace_sql = f"""
+    # CREATE KEYSPACE IF NOT EXISTS {TEST_KEYSPACE}
+    # WITH REPLICATION = {{ 'class': 'SimpleStrategy',
+    # 'replication_factor': 1 }}
+    # """
+    create_table_sql = f"""
+    CREATE TABLE IF NOT EXISTS {TEST_KEYSPACE}.{TEST_TABLE} (
+        user_id int PRIMARY KEY,
+        name text,
+        email text,
+        age int
+    )
+    """
+    async with PolyClient() as client:
+        # We don't need to specify the keyspace for creating a keyspace
+        # await client.execute(create_keyspace_sql, engine="cassandra")
+        # print(f"-> Ensured keyspace '{TEST_KEYSPACE}' exists.")
+
+        # Now execute the CREATE TABLE statement
+        await client.execute(create_table_sql, engine="cassandra")
+        print(f"-> Ensured table '{TEST_TABLE}' exists.")
+    print("--- [Module Setup] Schema setup complete ---")
 
 
-@pytest.fixture(scope="module")
-def event_loop():
-    import asyncio
-
-    loop = asyncio.get_event_loop_policy().new_event_loop()
-    yield loop
-    loop.close()
+@pytest.fixture(scope="function", autouse=True)
+async def clean_test_table():
+    """
+    Pytest fixture that runs before each test function. It truncates the test
+    table to ensure that each test starts with a clean slate and is independent
+    of others.
+    """
+    truncate_sql = f"TRUNCATE TABLE {TEST_KEYSPACE}.{TEST_TABLE}"
+    async with PolyClient() as client:
+        await client.execute(truncate_sql, engine="cassandra")
 
 
 @pytest.mark.asyncio
 async def test_cassandra_crud_operations():
     """Tests the full Create, Read, Update, Delete cycle using PolyClient."""
     async with PolyClient() as client:
-        # Arrange: Use a unique ID for this test case
         user_id = int(str(uuid.uuid4().int)[:5])
         original_name = "Cassandra User"
         updated_name = "Updated Cassandra User"
@@ -72,36 +67,51 @@ async def test_cassandra_crud_operations():
             f"INSERT INTO {TEST_TABLE} (user_id, name, email, age) "
             f"VALUES ({user_id}, '{original_name}', 'crud@example.com', 40)"
         )
-        # Execute returns None for successful inserts via this path
-        await client.execute(insert_sql, engine="cassandra")
+        insert_result = await client.execute(insert_sql, engine="cassandra")
+        assert insert_result == []
 
         # 2. Get (Read)
-        user = await client.get(TEST_TABLE, user_id, engine="cassandra")
+        user = await client.get(
+            TEST_TABLE,
+            primary_key_value=user_id,
+            engine="cassandra",
+            primary_key_column="user_id",
+        )
         assert user is not None
         assert user["name"] == original_name
         assert user["age"] == 40
 
         # 3. Update
         update_sql = f"UPDATE {TEST_TABLE} SET name = '{updated_name}' WHERE user_id = {user_id}"  # noqa:E501
-        update_result = await client.execute(update_sql, engine="cassandra")
-        assert update_result["updated_count"] == 1
+        update_result = await client.execute(
+            update_sql, engine="cassandra", use_catalogue=False
+        )
+        assert update_result == {"backend": "cassandra", "updated_count": 1}
 
         # Verify Update
         updated_user = await client.get(
-            TEST_TABLE, user_id, engine="cassandra"
-        )  # noqa:E501
+            TEST_TABLE,
+            primary_key_value=user_id,
+            engine="cassandra",
+            primary_key_column="user_id",
+        )
         assert updated_user is not None
         assert updated_user["name"] == updated_name
 
         # 4. Delete
         delete_sql = f"DELETE FROM {TEST_TABLE} WHERE user_id = {user_id}"
-        delete_result = await client.execute(delete_sql, engine="cassandra")
-        assert delete_result["deleted_count"] == 1
+        delete_result = await client.execute(
+            delete_sql, engine="cassandra", use_catalogue=False
+        )
+        assert delete_result == {"backend": "cassandra", "deleted_count": 1}
 
         # Verify Deletion
         deleted_user = await client.get(
-            TEST_TABLE, user_id, engine="cassandra"
-        )  # noqa:E501
+            TEST_TABLE,
+            primary_key_value=user_id,
+            engine="cassandra",
+            primary_key_column="user_id",
+        )
         assert deleted_user is None
 
 
@@ -125,20 +135,20 @@ async def test_cassandra_get_all_and_count():
         all_users = await client.execute(
             f"SELECT * FROM {TEST_TABLE}", engine="cassandra"
         )
-        # The test assumes at least these two users exist;
-        # could be more from other tests
         assert len(all_users) >= 2
 
         # Act & Assert: count
         count_result = await client.execute(
             f"SELECT COUNT(*) FROM {TEST_TABLE}", engine="cassandra"
         )
-        assert count_result[0]["count"] >= 2
+        assert count_result and "count" in count_result[0]
+        logging.info(f"count_result: {count_result}")
+        assert int(count_result[0]["count"]) >= 2
 
 
 @pytest.mark.asyncio
 async def test_cassandra_complex_query():
-    """Tests a SELECT with a WHERE clause via PolyClient."""
+    """Tests a SELECT with a WHERE clause that requires filtering."""
     async with PolyClient() as client:
         # Arrange
         user_id = int(str(uuid.uuid4().int)[:7])
@@ -147,10 +157,10 @@ async def test_cassandra_complex_query():
             engine="cassandra",
         )
 
-        # Act: Execute a query that requires translation and filtering
+        # Act: Execute a query that requires translation and filtering.
         sql = f"SELECT name, email FROM {TEST_TABLE} WHERE age > 50"
         results = await client.execute(sql, engine="cassandra")
-
+        logging.info(f"results: {results}")
         # Assert
         assert any(r["name"] == "FilterUser" for r in results)
         record = next((r for r in results if r["name"] == "FilterUser"), None)

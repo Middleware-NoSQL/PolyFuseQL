@@ -1,0 +1,32 @@
+# STAGE 1: Build Environment
+# This stage compiles the TypeScript code into JavaScript.
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# Copy package files and install dependencies first to leverage Docker's layer caching.
+COPY permission-service/package*.json ./
+RUN npm install
+
+# Copy the rest of the source code for the permission service.
+COPY permission-service/ ./
+
+# Build the TypeScript project.
+RUN npm run build
+
+# STAGE 2: Production Environment
+# This stage creates a smaller, more secure image with only the necessary runtime files.
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Copy built artifacts and production dependencies from the builder stage.
+COPY --from=builder /app/package.json ./
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/dist ./dist
+
+# The permission service runs on port 3002.
+EXPOSE 3002
+
+# The command to start the service in production mode.
+CMD [ "npm", "run", "start:prod" ]

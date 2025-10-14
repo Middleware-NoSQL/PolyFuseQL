@@ -70,6 +70,7 @@ class PolyClient:
             self.rd.connect(),
             self.nj.connect(),
             self.mongo.connect(),
+            self.cassandra.connect(),
         )  # noqa:F501
         return self
 
@@ -80,6 +81,7 @@ class PolyClient:
             self.rd.disconnect(),
             self.nj.disconnect(),
             self.mongo.disconnect(),
+            self.cassandra.disconnect(),
         )
 
     async def get(
@@ -153,8 +155,15 @@ class PolyClient:
         else:
             strategy = self.query_strategies.get(type(ast))
 
-        if not strategy:
+        if not strategy and self.backends.get(engine).is_local_implementation:
             raise NotImplementedError(f"Unsupported query type: {type(ast)}")
+        if (
+            not strategy
+            and not self.backends.get(engine).is_local_implementation  # noqa:E501
+        ):  # noqa:E501
+            conn = self.backends.get(engine)
+            result = await conn.query(ast.sql())
+            return result if result else []
 
         target_backend = engine
         if use_catalogue and not target_backend:

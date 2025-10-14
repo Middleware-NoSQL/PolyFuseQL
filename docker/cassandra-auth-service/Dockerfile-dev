@@ -1,0 +1,29 @@
+# STAGE 1: Build Environment
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# Copy package files and install dependencies
+# This leverages Docker's layer caching
+COPY auth-service/package*.json ./
+RUN npm install
+
+# Copy the rest of the source code
+COPY auth-service/ ./
+
+# Build the TypeScript project
+RUN npm run build
+
+# STAGE 2: Production Environment
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Copy artifacts from the builder stage
+COPY --from=builder /app/package.json ./
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/dist ./dist
+
+EXPOSE 3001
+
+CMD [ "npm", "run", "start:prod" ]

@@ -1,0 +1,62 @@
+# This Docker Compose file is for isolated testing of the Cassandra translator and the database.
+# To run: docker-compose -f docker-compose.testing.yml up --build
+volumes:
+  polyfuseql-cassandra-data-test:
+
+networks:
+  polyfuse-test-net:
+    driver: bridge
+
+services:
+  # ────────────── Cassandra Database ────────────── #
+  cassandra:
+    image: cassandra:latest
+    container_name: polyfuseql_cassandra_test
+    ports:
+      # Exposing on port 9043 to avoid conflicts with other local Cassandra instances
+      - "9043:9042"
+    environment:
+      # These variables enable authentication and set up the default user/password
+      - CASSANDRA_CLUSTER_NAME=PolyFuseTestCluster
+      - CASSANDRA_DC=datacenter1
+      - CASSANDRA_RACK=rack1
+      - CASSANDRA_ENDPOINT_SNITCH=SimpleSnitch
+      - CASSANDRA_AUTHENTICATOR=PasswordAuthenticator
+      - CASSANDRA_AUTHORIZER=CassandraAuthorizer
+      - CASSANDRA_USER=cassandra
+      - CASSANDRA_PASSWORD=cassandra
+    volumes:
+      - polyfuseql-cassandra-data-test:/var/lib/cassandra
+    healthcheck:
+      # Healthcheck now uses authentication credentials to verify connectivity
+      test: ["CMD-SHELL", "cqlsh -u cassandra -p cassandra -e 'describe keyspaces'"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      - polyfuse-test-net
+
+  # ─────────── Cassandra Translator API ─────────── #
+  cassandra-translator-api:
+    build:
+      context: .
+      # Assuming your Dockerfile is in the specified path relative to the project root
+      dockerfile: docker/cassandra-translator/Dockerfile
+    container_name: polyfuseql_cassandra_translator_test
+    ports:
+      # Exposing on port 3101 to avoid conflicts
+      - "3101:3000"
+    environment:
+      # These variables tell the API how to find and authenticate with the Cassandra container
+      - CASSANDRA_HOST=cassandra
+      - CASSANDRA_PORT=9042
+      - CASSANDRA_USER=cassandra
+      - CASSANDRA_PASSWORD=cassandra
+      - CASSANDRA_KEYSPACE=mykeyspace # You can change this to your desired keyspace
+    depends_on:
+      cassandra:
+        # This condition ensures the API only starts after Cassandra is healthy and ready
+        condition: service_healthy
+    networks:
+      - polyfuse-test-net
