@@ -1,35 +1,42 @@
 [tool.poetry]
 name        = "polyfuseql"
 version     = "0.1.0"
-description = "Universal SQL/NoSQL query orchestrator middleware"
+description = "Universal SQL/NoSQL query orchestrator middleware with a FastAPI interface."
 authors     = ["andr3slelouch <andr3slelouch@github.com>"]
 license     = "GPL-3.0-only"
 readme      = "README.md"
-packages    = [{ include = "polyfuseql" }]
+packages    = [{ include = "polyfuseql", from = "src" }]
 
 [tool.poetry.dependencies]
 python            = "^3.10"
+
+# Core PolyFuseQL & FastAPI Dependencies
+sqlglot           = ">=26.17.1,<27.0.0"
 fastapi           = "0.116.1"
 uvicorn           = { version = ">=0.34.2,<0.35.0", extras = ["standard"] }
-sqlglot           = ">=26.17.1,<27.0.0"
+pydantic          = "^2.11.7"
+pydantic-settings = ">=2.9.1,<3.0.0"
+
+# Database Connectors
 sqlalchemy        = { version = ">=2.0.41,<3.0.0", extras = ["asyncio"] }
 asyncpg           = ">=0.30.0,<0.31.0"
 httpx             = ">=0.28.1,<0.29.0"
-pydantic-settings = ">=2.9.1,<3.0.0"
-flask-cors        = "6.0.0"
 redis             = "^5.0"
 neo4j             = "^5.20"
-requests = "2.32.4"
-urllib3 = "2.5.0"
-starlette = "0.47.2"
-rich = "^13.7.1"
-configargparse = "1.7.1"
-pydantic = "^2.11.7"
-pyspark = "^4.0.0"
-aiohttp = "^3.12.15"
-cassandra-driver = "^3.29.2"
-pymongo = "^4.15.1"
+cassandra-driver  = "^3.29.2"
+requests          = "2.32.4"
+urllib3           = "2.5.0"
+starlette         = "0.47.2"
+configargparse    = "1.7.1"
+pymongo           = "^4.15.1"
+pyspark           = "^4.0.0"
+aiohttp           = "^3.12.15"
 
+
+# Console Application Dependencies
+rich              = "^13.7.1"
+click             = ">=8.0.0"
+flask-cors        = "6.0.0" # Note: This seems related to the old CLI or a different web component. Keeping for now.
 
 [tool.poetry.group.dev.dependencies]
 pytest          = "^8.3.5"
@@ -44,10 +51,10 @@ behave          = "^1.2.6"
 locust          = "^2.37.3"
 mkdocs-material = "^9.6.14"
 
-
 [build-system]
 requires      = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.ruff.lint]
 ignore = ["E501"]
+

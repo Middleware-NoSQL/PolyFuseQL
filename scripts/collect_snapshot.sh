@@ -19,7 +19,7 @@ echo "📄  Writing snapshot to $out"
 
 # ----------- function to decide if file is text ---
 is_text() {
-    file --mime "$1" 2>/dev/null | grep -q "text/"
+    [[ "$(file -b --mime-encoding "$1")" != "binary" ]]
 }
 
 # ----------- iterate over tracked files -----------
@@ -31,6 +31,8 @@ for f in $(git ls-files); do
         echo "===== BEGIN $f =====" >>"$out"
         cat "$f" >>"$out"
         echo -e "\n===== END $f =====\n" >>"$out"
+        #echo "Processed $f"
+    else echo "Not Processed $f!";
     fi
 done
 
