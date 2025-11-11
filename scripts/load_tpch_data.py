@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 from rich.console import Console
 from rich.progress import Progress
-from polyfuseql.client import PolyClient
+from polyfuseql.client.PolyClient import PolyClient
 
 # Configure logging
 logging.basicConfig(

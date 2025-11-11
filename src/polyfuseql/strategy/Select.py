@@ -6,7 +6,7 @@ from sqlglot import exp
 
 class SelectStrategy(QueryStrategy):
     async def execute(self, client, ast, backend, use_catalogue):
-        conn = client.backends.get(backend)
+        conn = await client.get_connector(backend)
 
         if not conn:
             raise ValueError(f"Connector for backend '{backend}' not found.")

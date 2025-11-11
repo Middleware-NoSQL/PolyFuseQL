@@ -24,7 +24,7 @@ class UpdateStrategy(QueryStrategy):
             conn = client.backends.get(expected_backend)
         else:
             pk_col = where_expr.left.name
-            conn = client.backends.get(backend)
+            conn = await client.get_connector(backend)
             expected_backend = backend
 
         if not conn:

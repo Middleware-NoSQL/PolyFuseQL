@@ -2,6 +2,8 @@
 """
 Main application file to initialize and run the FastAPI app.
 """
+import logging
+
 from fastapi import FastAPI
 
 # FIX: Changed imports to be absolute from the 'polyfuseql' package root.
@@ -13,6 +15,8 @@ app = FastAPI(
     description="A robust FastAPI backend for the PolyFuseQL middleware.",
     version="1.0.0",
 )
+
+logger = logging.getLogger("uvicorn.error")
 
 # Include the API routers for each database
 app.include_router(postgres.router, prefix="/postgres", tags=["PostgreSQL"])

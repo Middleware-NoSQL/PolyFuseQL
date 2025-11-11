@@ -3,9 +3,16 @@
 Integration tests for the API endpoints.
 NOTE: These tests require the full Docker Compose stack to be running.
 """
+import logging
+
 import pytest
 from httpx import AsyncClient, ASGITransport
 from polyfuseql.app.main import app
+from polyfuseql.client import PolyClient
+
+from scripts.generate_ground_truth import load_data_into_postgres
+
+BASE_URL = "http://127.0.0.1:8000"
 
 
 @pytest.mark.asyncio
@@ -13,9 +20,7 @@ async def test_read_root():
     """
     Test the root endpoint.
     """
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=BASE_URL) as ac:
         response = await ac.get("/")
     assert response.status_code == 200
     assert response.json() == {"message": "Welcome to the PolyFuseQL API!"}
@@ -26,17 +31,19 @@ async def test_query_postgres():
     """
     Test the PostgreSQL query endpoint against a live database.
     """
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
+    async with PolyClient.PolyClient() as client:
+        await load_data_into_postgres(client)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=BASE_URL) as ac:
         response = await ac.post(
-            "/postgres/query", json={"sql": "SELECT 1 AS test_col;"}
+            "/postgres/query",
+            json={"sql": "SELECT l_returnflag FROM lineitem WHERE l_quantity = 1;"},
         )
 
     assert response.status_code == 200
     data = response.json()
+    logging.info("Query result: %s", data)
     assert "result" in data
-    assert data["result"] == [{"test_col": 1}]
+    assert data["result"][0].get("lQuantity") == 1
 
 
 @pytest.mark.asyncio
@@ -48,9 +55,7 @@ async def test_query_redis():
     # This query is based on the TPC-H schema and
     # tests the SQL parsing for Redis.
     sql_query = "SELECT * FROM Customer WHERE c_custkey = '1'"
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=BASE_URL) as ac:
         response = await ac.post("/redis/query", json={"sql": sql_query})
 
     assert response.status_code == 200
@@ -64,9 +69,7 @@ async def test_query_neo4j():
     """
     # Using a simple Cypher query that PolyFuseQL's core can handle.
     sql_query = "MATCH (n) RETURN count(n) AS node_count"
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=BASE_URL) as ac:
         response = await ac.post("/neo4j/query", json={"sql": sql_query})
 
     assert response.status_code == 200
@@ -85,9 +88,7 @@ async def test_query_cassandra():
     # This is a basic query that should always work on a
     # live Cassandra instance.
     sql_query = "SELECT cluster_name FROM system.local"
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=BASE_URL) as ac:
         response = await ac.post("/cassandra/query", json={"sql": sql_query})
 
     assert response.status_code == 200
@@ -103,9 +104,7 @@ async def test_query_mongodb():
     """
     # This requires a 'customer' collection in the MongoDB test database.
     sql_query = "SELECT * FROM customer LIMIT 1"
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=BASE_URL) as ac:
         response = await ac.post("/mongodb/query", json={"sql": sql_query})
 
     assert response.status_code == 200

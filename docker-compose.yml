@@ -20,7 +20,7 @@ services:
     command: >
       -c "cp /usr/local/bin/dists.dss /data && 
           cd /data && 
-          /usr/local/bin/dbgen -s 0.1 -f -v && 
+          /usr/local/bin/dbgen -s 0.01 -f -v && 
           chown ${UID:-1000}:${GID:-1000} ./*"
     networks:
       - polyfuse-net
@@ -29,6 +29,7 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: polyfuseql_pg_tpch
+    profiles: ["postgres", "db"]
     environment:
       POSTGRES_DB: tpch
       POSTGRES_USER: tpch
@@ -55,6 +56,7 @@ services:
   redis:
     image: redis/redis-stack:latest
     container_name: polyfuseql_redis_kv
+    profiles: ["redis", "db"]
     command: ["redis-stack-server", "--requirepass", "tpch", "--protected-mode", "no"]
     volumes:
       - polyfuseql-redis-data:/data
@@ -71,6 +73,7 @@ services:
   neo4j:
     image: neo4j:5-community
     container_name: polyfuseql_neo4j_graph
+    profiles: ["neo4j", "db"]
     user: "${UID:-1000}:${GID:-1000}"
     environment:
       NEO4J_AUTH: neo4j/password
@@ -99,6 +102,7 @@ services:
   mongodb:
     image: mongo:latest
     container_name: polyfuseql_mongodb
+    profiles: ["mongodb", "db"]
     ports:
       - "27018:27017"
     environment:
@@ -119,6 +123,7 @@ services:
   cassandra:
     image: cassandra:latest
     container_name: polyfuseql_cassandra
+    profiles: ["cassandra", "db", "cassandra-services"]
     ports:
       - "9043:9042"
     environment:
@@ -147,6 +152,7 @@ services:
       context: .
       dockerfile: docker/mongo-translator/Dockerfile
     container_name: polyfuseql_mongo_translator
+    profiles: ["mongo-translator", "api"]
     ports:
       - "5101:5000"
     environment:
@@ -170,6 +176,7 @@ services:
       context: . # The context is the root of your project
       dockerfile: docker/cassandra-translator/Dockerfile # Path to the new Dockerfile
     container_name: polyfuseql_cassandra_translator
+    profiles: ["cassandra-translator", "api","cassandra-services"]
     ports:
       - "3101:3000"
     environment:
@@ -199,6 +206,7 @@ services:
       context: .
       dockerfile: docker/cassandra-auth-service/Dockerfile
     container_name: polyfuseql_cassandra_translator_auth
+    profiles: ["cassandra-auth", "api", "cassandra-services"]
     ports:
       - "3001:3001"
     environment:
@@ -227,6 +235,7 @@ services:
       context: .
       dockerfile: docker/cassandra-permission-service/Dockerfile
     container_name: polyfuseql_cassandra_translator_permission
+    profiles: ["cassandra-permission", "api", "cassandra-services"]
     ports:
       - "3002:3002"
     environment:

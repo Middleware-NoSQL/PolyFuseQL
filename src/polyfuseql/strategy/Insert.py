@@ -66,7 +66,7 @@ class InsertStrategy(QueryStrategy):
                         values.append(val_str)
 
         payload = dict(zip(columns, values))
-        conn = client.backends[backend]
+        conn = await client.get_connector(backend)
         logging.info(f"insert-strategy-payload: {payload}")
         logging.info(f"insert-strategy-table: {table}")
         logging.info(f"insert-strategy-backend: {backend}")

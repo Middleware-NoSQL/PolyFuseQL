@@ -66,6 +66,8 @@ class PostgresConnector(Connector):
         return int(row["n"]) if row else 0
 
     async def get(self, table: str, pk_col: str, pk_val: Any) -> Dict:
+        # TODO Correctfully use of the select logic if the GET will be used
+        #  liske that
         if not isinstance(pk_col, str):
             msg = "Primary key column name must be a string, got "
             msg += f"{type(pk_col).__name__}"

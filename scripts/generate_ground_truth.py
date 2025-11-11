@@ -53,7 +53,7 @@ def round_results(results):
 async def load_data_into_postgres(client):
     """Helper function to load all TPC-H data into PostgreSQL."""
     print("Loading data into PostgreSQL...")
-    loader_connector = client.backends["postgres"]
+    loader_connector = await client.get_connector("postgres")
     for table, filepath in TABLE_FILES.items():
         if filepath.exists():
             print(f"  Loading {table}...")

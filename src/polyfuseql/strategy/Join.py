@@ -12,7 +12,7 @@ class JoinStrategy(QueryStrategy):
             msg = "An 'engine' must be specified for JOIN operations."
             raise ValueError(msg)
 
-        conn = client.backends.get(backend)
+        conn = await client.get_connector(backend)
         if not conn:
             raise ValueError(f"Connector for backend '{backend}' not found.")
 

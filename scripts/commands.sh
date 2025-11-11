@@ -12,6 +12,10 @@ sudo docker-compose up -d            # crea y popula
 docker-compose down -v          # borra volúmenes
 docker-compose up -d            # crea y popula
 
+docker-compose --profile postgres up -d
+docker-compose --profile postgres --profile redis up -d
+docker-compose --profile db up -d
+
 # Ver progreso de semillas
 sudo docker-compose logs -f redis-seed
 sudo docker-compose logs -f neo4j-seed
