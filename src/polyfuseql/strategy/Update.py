@@ -21,7 +21,7 @@ class UpdateStrategy(QueryStrategy):
             ), catalogue_entry.get(
                 "pk"
             )  # noqa:F501
-            conn = client.backends.get(expected_backend)
+            conn = await client.get_connector(expected_backend)
         else:
             pk_col = where_expr.left.name
             conn = await client.get_connector(backend)

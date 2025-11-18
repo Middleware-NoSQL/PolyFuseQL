@@ -48,7 +48,10 @@
   },
   "partsupp": {
     "backend": "postgres",
-    "pk": ["ps_partkey", "ps_suppkey"],
+    "pk": [
+      "ps_partkey",
+      "ps_suppkey"
+    ],
     "columns": {
       "ps_partkey": "int",
       "ps_suppkey": "int",
@@ -74,7 +77,7 @@
   "customers": {
     "backend": "postgres",
     "pk": "customer_id",
-     "columns": {
+    "columns": {
       "customer_id": "str",
       "company_name": "str"
     }
@@ -82,7 +85,7 @@
   "products": {
     "backend": "postgres",
     "pk": "product_id",
-     "columns": {
+    "columns": {
       "product_id": "int",
       "product_name": "str"
     }
@@ -104,7 +107,10 @@
   },
   "lineitem": {
     "backend": "redis",
-    "pk": ["l_orderkey", "l_linenumber"],
+    "pk": [
+      "l_orderkey",
+      "l_linenumber"
+    ],
     "columns": {
       "l_orderkey": "int",
       "l_partkey": "int",
@@ -137,8 +143,34 @@
     "backend": "neo4j",
     "pk": "id",
     "columns": {
-        "id": "str",
-        "name": "str"
+      "id": "str",
+      "name": "str"
+    }
+  },
+  "profile": {
+    "backend": "redis",
+    "pk": "id",
+    "columns": {
+      "id": "str",
+      "user_id": "str",
+      "skill": "str"
+    }
+  },
+  "customer_redis": {
+    "backend": "redis",
+    "pk": "c_custkey",
+    "columns": {
+      "c_custkey": "str",
+      "c_name": "str"
+    }
+  },
+  "orders_redis": {
+    "backend": "redis",
+    "pk": "o_orderkey",
+    "columns": {
+      "o_orderkey": "str",
+      "o_custkey": "str",
+      "o_totalprice": "decimal"
     }
   }
 }

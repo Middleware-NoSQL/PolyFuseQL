@@ -48,9 +48,10 @@ class SelectStrategy(QueryStrategy):
         if use_catalogue:
             catalogue_entry = client._catalogue.get(table_name.lower())
             msg = f"Table '{table_name}' not found in catalogue."
+            logging.info(f"catalogue_entry {catalogue_entry}")
             if not catalogue_entry:
                 raise ValueError(msg)
-            _, pk_col = catalogue_entry
+            pk_col = catalogue_entry.get("pk", None)
         else:
             pk_col = str(where_expr.left.this)
 

@@ -36,26 +36,8 @@ class PolyClient:
     ) -> None:
         self.options = options or {}
         self.catalogue = Catalogue(schema_path)
-        # self.pg = ConnectorFactory.create_connector("postgres", self.catalogue)
-        # self.rd = ConnectorFactory.create_connector(
-        #     "redis", self.catalogue, self.options
-        # )
-        # self.nj = ConnectorFactory.create_connector("neo4j", self.catalogue)
-        # self.mongo = ConnectorFactory.create_connector(
-        #     "mongodb", self.catalogue
-        # )  # noqa:E501
-        # self.cassandra = ConnectorFactory.create_connector(
-        #     "cassandra", self.catalogue
-        # )  # noqa:E501
+
         self._catalogue = self.catalogue  # Keep for backward compatibility
-        # self.backends = {
-        #     "postgres": self.pg,
-        #     "pg": self.pg,
-        #     "redis": self.rd,
-        #     "neo4j": self.nj,
-        #     "mongodb": self.mongo,
-        #     "cassandra": self.cassandra,
-        # }
 
         # 1. Store connection cache (lazily populated)
         self._connections: Dict[str, Connector] = {}
@@ -68,7 +50,9 @@ class PolyClient:
             "redis": lambda: ConnectorFactory.create_connector(
                 "redis", self.catalogue, self.options
             ),
-            "neo4j": lambda: ConnectorFactory.create_connector("neo4j", self.catalogue),
+            "neo4j": lambda: ConnectorFactory.create_connector(
+                "neo4j", self.catalogue
+            ),  # noqa:E501
             "mongodb": lambda: ConnectorFactory.create_connector(
                 "mongodb", self.catalogue
             ),
@@ -98,6 +82,7 @@ class PolyClient:
         # 3. Check cache first
         conn = self._connections.get(engine)
         if conn:
+            conn._options = self.options
             return conn
 
         # 4. Not in cache, get the factory
@@ -110,13 +95,16 @@ class PolyClient:
         conn = factory()
         await conn.connect()
         self._connections[engine] = conn
+        conn._options = self.options
         logging.info(f"Connection for '{engine}' established and cached.")
         return conn
 
     async def close_all_connections(self):
         """Iterates and disconnects all *active* connections."""
         logging.info(f"Closing {len(self._connections)} active connections...")
-        disconnect_tasks = [conn.disconnect() for conn in self._connections.values()]
+        disconnect_tasks = [
+            conn.disconnect() for conn in self._connections.values()
+        ]  # noqa:E501
         await asyncio.gather(*disconnect_tasks)
         self._connections.clear()
         logging.info("All active connections closed.")
@@ -178,7 +166,7 @@ class PolyClient:
             msg += "exist in the catalogue."
             raise ValueError(msg)
 
-        conn = self.backends.get(target_engine)
+        conn = await self.get_connector(target_engine)
         if not conn:
             raise ValueError(f"Unknown backend '{target_engine}'")
 
@@ -187,7 +175,7 @@ class PolyClient:
         logging.info(f"Primary key: {target_pk_col}")
         logging.info(f"Primary key value: {primary_key_value}")
         return await conn.get(
-            entity=table_name,
+            table_name,
             pk_col=str(target_pk_col),
             pk_val=primary_key_value,  # noqa:E501
         )  # noqa:F501
@@ -198,7 +186,7 @@ class PolyClient:
 
         if not use_catalogue and not engine:
             raise ValueError(
-                "An explicit 'engine' must be provided when not using the catalogue."
+                "An explicit 'engine' must be provided when not using the catalogue."  # noqa:E501
             )
 
         ast = sqlglot.parse_one(sql)
@@ -209,7 +197,9 @@ class PolyClient:
             table_name = ast.find(exp.Table).name.lower()
             schema = self.catalogue.get_schema(table_name)
             if not schema:
-                raise ValueError(f"Table '{table_name}' not found in catalogue.")
+                raise ValueError(
+                    f"Table '{table_name}' not found in catalogue."
+                )  # noqa:E501
             target_backend = schema["backend"]
 
         if not target_backend:
@@ -231,50 +221,11 @@ class PolyClient:
         # call get_connector() itself.
         return await strategy.execute(self, ast, target_backend, use_catalogue)
 
-    # async def execute(
-    #     self, sql: str, *, engine: str = None, use_catalogue: bool = True
-    # ) -> Union[List, Dict]:
-    #     if not use_catalogue and not engine:
-    #         msg = "An explicit 'engine' must be provided "
-    #         msg += "when not using the catalogue."
-    #         raise ValueError(msg)
-    #
-    #     ast = sqlglot.parse_one(sql)
-    #
-    #     if isinstance(ast, exp.Select) and ast.find(exp.Join):
-    #         strategy = self.query_strategies["Join"]
-    #     else:
-    #         strategy = self.query_strategies.get(type(ast))
-    #
-    #     if not strategy and self.backends.get(engine).is_local_implementation:
-    #         raise NotImplementedError(f"Unsupported query type: {type(ast)}")
-    #     if (
-    #         not strategy
-    #         and not self.backends.get(engine).is_local_implementation  # noqa:E501
-    #     ):  # noqa:E501
-    #         conn = self.backends.get(engine)
-    #         result = await conn.query(ast.sql())
-    #         return result if result else []
-    #
-    #     target_backend = engine
-    #     if use_catalogue and not target_backend:
-    #         table_name = ast.find(exp.Table).name.lower()
-    #         schema = self.catalogue.get_schema(table_name)
-    #         if not schema:
-    #             raise ValueError(
-    #                 f"Table '{table_name}' not found in catalogue."
-    #             )  # noqa:F501
-    #         target_backend = schema["backend"]
-    #
-    #     if not target_backend:
-    #         raise ValueError("Could not determine target backend.")
-    #
-    #     return await strategy.execute(self, ast, target_backend, use_catalogue)
-
     async def bulk_load_table(
         self, table_name: str, file_path: str, engine: str
     ) -> int:
-        connector = self.get_connector(engine)
+        connector = await self.get_connector(engine)
+        logging.info(f"Type connector: {type(connector)}")
         if not connector:
             raise ValueError(f"Unknown engine: {engine}")
         return await connector.bulk_insert(table_name, file_path)

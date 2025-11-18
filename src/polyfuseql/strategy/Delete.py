@@ -18,7 +18,7 @@ class DeleteStrategy(QueryStrategy):
                 msg = f"Table '{table_name}' not found in catalogue."
                 raise ValueError(msg)
 
-            _, pk_col = catalogue_entry
+            pk_col = catalogue_entry.get("pk", None)
         else:
             pk_col = str(where_expr.left.this)
         query_pk_col = where_expr.left.name

@@ -23,10 +23,11 @@ class PostgresSettings(BaseModel):
 
 
 class RedisSettings(BaseModel):
-    host: str = "redis"
+    host: str = "localhost"
     port: int = 6379
     db: int = 0
     password: str = "tpch"
+    data_type: str = "string"
 
 
 class Neo4jSettings(BaseModel):
@@ -75,6 +76,8 @@ class SparkSettings(BaseModel):
     shuffle_partitions: str = "144"
     network_timeout: str = "8000s"
     executor_heartbeat_interval: str = "60s"
+    neo4j_spark_jar_path: str = ""
+    redis_spark_jar_package: str = "com.redis.spark:spark-redis_2.13:3.3.0"
 
 
 class AppSettings(BaseSettings):

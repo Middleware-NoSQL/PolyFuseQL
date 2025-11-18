@@ -1,6 +1,8 @@
 import csv
 import json
 import logging
+import asyncio  # Import asyncio for thread bridging
+from ast import literal_eval
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional
 
@@ -15,7 +17,7 @@ from polyfuseql.utils.spark_manager import get_spark_session
 from polyfuseql.utils.utils import get_pydantic_model, _camelize_keys
 
 try:
-    from pyspark.sql import functions as F
+    from pyspark.sql import functions as F, DataFrame
     from pyspark.sql.types import (
         StructType,
         StructField,
@@ -44,9 +46,12 @@ class RedisConnector(Connector):
         self._password = settings.redis.password
         self._client: Optional[aioredis.Redis] = None
 
+    def set_data_type(self, data_type: dict) -> None:
+        self._options = data_type
+
     def get_data_type(self) -> str:
         """Returns the current data type strategy for Redis operations."""
-        return self._options.get("data_type", settings.redis_data_type)
+        return self._options.get("data_type", settings.redis.data_type)
 
     async def connect(self) -> None:
         if not self._client:
@@ -189,22 +194,32 @@ class RedisConnector(Connector):
 
     async def get_all(self, entity: str) -> List[Dict[str, Any]]:
         r = self._get_client()
+        logging.info("Entity: %s", entity)
+
         keys = [
             key
             async for key in r.scan_iter(
-                f"{entity.capitalize()}:*:{self.get_data_type()}"
+                f"{entity.capitalize()}:*"
+                + (
+                    f":{self.get_data_type()}"
+                    if self._options.get("include_data_type_in_pk", False)
+                    else ""
+                )
             )
         ]
         if not keys:
+            logging.info("Not keys to get")
             return []
         pipe = r.pipeline()
         for key in keys:
+            logging.info(f"get-key: {key}")
             if self.get_data_type() == "hash":
-                pipe.hgetall(key)
+                await pipe.hgetall(key)
             else:
-                pipe.get(key)
+                await pipe.get(key)
         results = await pipe.execute()
-        return [dict(res) for res in results if res]
+        logging.info(f"Results: {results}")
+        return [dict(literal_eval(res)) for res in results if res]
 
     async def query(
         self, sql: str, params: tuple = None
@@ -233,17 +248,29 @@ class RedisConnector(Connector):
         return StructType(fields)
 
     def _translate_expression_to_spark(self, expression: exp.Expression):
-        if isinstance(expression, exp.Star):
-            return F.lit(1)
+        if isinstance(expression, exp.Alias):
+            # Handle alias, but recurse on the aliased expression
+            inner_expr = self._translate_expression_to_spark(expression.this)
+            return inner_expr.alias(expression.alias)
+
         if isinstance(expression, exp.Column):
-            return F.col(expression.this.name)
+            # Handle qualified columns like t1.c_custkey
+            if expression.table:
+                return F.col(f"{expression.table}.{expression.name}")
+            return F.col(expression.name)
+
         if isinstance(expression, exp.Literal):
             try:
+                # Try to cast to Decimal for numeric literals
                 return F.lit(Decimal(expression.this))
             except InvalidOperation:
+                # Fallback to string literal
                 return F.lit(expression.this)
+
         if isinstance(expression, exp.Paren):
             return self._translate_expression_to_spark(expression.this)
+
+        # Binary operations (e.g., in JOINs or WHERE)
         if isinstance(expression, exp.Binary):
             left = self._translate_expression_to_spark(expression.left)
             right = self._translate_expression_to_spark(expression.right)
@@ -251,139 +278,323 @@ class RedisConnector(Connector):
                 exp.Mul: lambda a, b: a * b,
                 exp.Sub: lambda a, b: a - b,
                 exp.Add: lambda a, b: a + b,
+                exp.Div: lambda a, b: a / b,
+                exp.EQ: lambda a, b: a == b,
+                exp.NEQ: lambda a, b: a != b,
+                exp.GT: lambda a, b: a > b,
+                exp.GTE: lambda a, b: a >= b,
+                exp.LT: lambda a, b: a < b,
                 exp.LTE: lambda a, b: a <= b,
+                exp.And: lambda a, b: a & b,
+                exp.Or: lambda a, b: a | b,
             }
             if type(expression) in op_map:
                 return op_map[type(expression)](left, right)
+
+        # Aggregate Functions
+        if isinstance(expression, exp.AggFunc):
+            inner_expr = self._translate_expression_to_spark(expression.this)
+            agg_map = {
+                exp.Sum: F.sum,
+                exp.Avg: F.avg,
+                exp.Count: F.count,
+                exp.Min: F.min,
+                exp.Max: F.max,
+            }
+            if type(expression) in agg_map:
+                agg_expr = agg_map[type(expression)](inner_expr)
+                if type(expression) in [exp.Sum, exp.Avg]:
+                    # Cast aggregates to a high-precision decimal
+                    agg_expr = agg_expr.cast(DecimalType(38, 6))
+                return agg_expr
+
         if (
             isinstance(expression, exp.Cast)
             and expression.to.this == exp.DataType.Type.DATE
         ):
             return F.to_date(F.lit(expression.this.this))
+
         msg = "Unsupported SQL expression for Spark "
         msg += f"translation: {type(expression)}"
         raise NotImplementedError(msg)
 
+    async def _load_table_to_spark_df(
+        self, table_name: str, spark_session
+    ) -> "DataFrame":
+        """
+        Loads a table from Redis into a Spark DataFrame.
+
+        - If data_type is 'hash', it uses the scalable `spark-redis` connector.
+        - If data_type is 'string' or 'json', it falls back to the
+          less-scalable `mapPartitions` method which can handle custom types
+          but suffers from a driver-side SCAN bottleneck.
+        """
+        data_type = self.get_data_type()
+        target_schema = self._get_spark_schema(table_name)
+        if not target_schema:
+            raise ValueError(f"No Spark schema for table {table_name}")
+
+        # ------------------------------------------------------------------
+        # PATH 1: Scalable logic for 'hash' type
+        # ------------------------------------------------------------------
+        if data_type == "hash":
+            logging.info(
+                f"Using scalable `spark-redis` connector for 'hash' table: {table_name}"  # noqa:E501
+            )
+            key_pattern = f"{table_name.capitalize()}:*"
+            if self._options.get("include_data_type_in_pk", False):
+                key_pattern += f":{data_type}"
+
+            redis_config = {
+                "host": self._host,
+                "port": str(self._port),
+                "password": self._password,
+                "key.pattern": key_pattern,
+                "infer.schema": "false",
+            }
+
+            def _load_sync() -> "DataFrame":
+                try:
+                    df = (
+                        spark_session.read.format("org.apache.spark.sql.redis")
+                        .schema(target_schema)
+                        .options(**redis_config)
+                        .load()
+                    )
+                    return df
+                except Exception as e:
+                    logging.error(
+                        f"Failed to load data using spark-redis: {e}"
+                    )  # noqa:E501
+                    return spark_session.createDataFrame([], target_schema)
+
+            df = await asyncio.to_thread(_load_sync)
+            return df
+
+        # ------------------------------------------------------------------
+        # PATH 2: Fallback logic for 'string' and 'json' types
+        # ------------------------------------------------------------------
+        else:
+            msg = "Using non-scalable `mapPartitions` "
+            msg += f"loader for data_type '{data_type}'."
+            msg += " This will be slow and may crash on large tables."
+            logging.warning(msg)
+            r = self._get_client()
+            redis_config = {
+                "host": self._host,
+                "port": self._port,
+                "password": self._password,
+            }
+            num_slices = spark_session.sparkContext.defaultParallelism * 4
+            # Pass data_type to the worker
+            data_type_for_worker = data_type
+
+            def fetch_redis_data(iterator):
+                """(Worker-side) Fetches data for string/json/hash types."""
+                import redis
+                import json
+
+                partition_keys = list(iterator)
+                if not partition_keys:
+                    return iter([])
+                r_sync = redis.Redis(**redis_config, decode_responses=True)
+                pipe = r_sync.pipeline(transaction=False)
+
+                # Use the closure variable
+                data_type = data_type_for_worker
+
+                for key in partition_keys:
+                    if data_type == "hash":
+                        pipe.hgetall(key)
+                    elif data_type in ["string", "json"]:
+                        pipe.get(key)
+                results = pipe.execute()
+
+                if data_type in ["string", "json"]:
+                    valid_results = []
+                    for res in results:
+                        if res:
+                            try:
+                                valid_results.append(json.loads(res))
+                            except json.JSONDecodeError:
+                                logging.warning(f"Could not decode JSON:{res}")
+                    return iter(valid_results)
+                else:
+                    return iter(results)
+
+            # This is the non-scalable part: scanning all keys on the driver.
+            key_pattern = f"{table_name.capitalize()}:*"
+            if self._options.get("include_data_type_in_pk", False):
+                key_pattern += f":{data_type}"
+
+            keys = [key async for key in r.scan_iter(key_pattern)]
+
+            if not keys:
+                return spark_session.createDataFrame([], target_schema)
+
+            # Parallelize the *list of keys*
+            keys_rdd = spark_session.sparkContext.parallelize(
+                keys, numSlices=num_slices
+            )
+            data_rdd = keys_rdd.mapPartitions(fetch_redis_data)
+            if data_rdd.isEmpty():
+                return spark_session.createDataFrame([], target_schema)
+
+            df = data_rdd.toDF()
+
+            # Cast columns (needed for mapPartitions, not for spark-redis)
+            for field in target_schema.fields:
+                if field.name in df.columns:
+                    df = df.withColumn(
+                        field.name, F.col(field.name).cast(field.dataType)
+                    )
+            return df
+
     async def join(self, ast: exp.Select) -> List[Dict[str, Any]]:
-        spark = get_spark_session()
+        """
+        [Sonar Refactor] Executes a JOIN query using Spark.
+        This method now delegates data loading to _load_table_to_spark_df.
+        """
+        spark = get_spark_session("Redis")
         if not spark:
-            raise NotImplementedError("PySpark is not available for JOINs.")
-        msg = "PySpark JOIN logic is "
-        msg += "not fully implemented yet."
-        raise NotImplementedError(msg)
+            raise RuntimeError("PySpark is not available for JOINs.")
+
+        # 1. Fetch the FROM table
+        from_table_expr = ast.args.get("from").this
+        from_table_name = from_table_expr.this.name
+        from_table_alias = from_table_expr.alias_or_name
+
+        joined_df = (
+            await self._load_table_to_spark_df(from_table_name, spark)
+        ).alias(  # noqa:E501
+            from_table_alias
+        )
+
+        # 2. Loop through JOINs
+        joins = ast.args.get("joins", [])
+        for join_expr in joins:
+            join_table_expr = join_expr.this
+            join_table_name = join_table_expr.this.name
+            join_table_alias = join_table_expr.alias_or_name
+
+            df_to_join = (
+                await self._load_table_to_spark_df(join_table_name, spark)
+            ).alias(join_table_alias)
+
+            join_condition = self._translate_expression_to_spark(
+                join_expr.args.get("on")
+            )
+            join_type = join_expr.args.get("kind", "INNER").lower()
+
+            joined_df = joined_df.join(
+                df_to_join, on=join_condition, how=join_type
+            )  # noqa:E501
+
+        # 3. Apply WHERE
+        if ast.args.get("where"):
+            filter_cond = self._translate_expression_to_spark(
+                ast.args["where"].this
+            )  # noqa:E501
+            joined_df = joined_df.filter(filter_cond)
+
+        # 4. Apply SELECT
+        select_expressions = [
+            self._translate_expression_to_spark(e) for e in ast.expressions
+        ]
+        final_df = joined_df.select(*select_expressions)
+
+        # 5. Apply ORDER BY
+        if ast.args.get("order"):
+            order_exprs = []
+            for e in ast.args["order"].expressions:
+                col = self._translate_expression_to_spark(e.this)
+                direction = e.args.get("desc", False)
+                order_exprs.append(col.desc() if direction else col.asc())
+            final_df = final_df.orderBy(*order_exprs)
+
+        # 6. Apply LIMIT
+        if ast.args.get("limit"):
+            limit_val = int(ast.args["limit"].this.this)
+            final_df = final_df.limit(limit_val)
+
+        # 7. Collect and return
+        results = [row.asDict() for row in final_df.collect()]
+        return [_camelize_keys(row) for row in results]
 
     async def group_by(self, ast: exp.Select) -> List[Dict[str, Any]]:
-        spark = get_spark_session()
+        """
+        [Sonar Refactor] Executes a GROUP BY query using Spark.
+        This method now delegates data loading to _load_table_to_spark_df.
+        """
+        spark = get_spark_session("Redis")
         if not spark:
             msg = "PySpark is required for GROUP BY "
             msg += "operations but is not available."
             raise RuntimeError(msg)
 
+        # 1. Load the data using the refactored helper
         table_name = ast.find(exp.Table).name
-        r = self._get_client()
-        keys = [
-            key
-            async for key in r.scan_iter(
-                f"{table_name.capitalize()}:*:{self.get_data_type()}"
-                if self._options.get("include_data_type_in_pk", False)
-                else f"{table_name.capitalize()}:*"
-            )
-        ]
-        if not keys:
+        df = await self._load_table_to_spark_df(table_name, spark)
+
+        if df.isEmpty():
             return []
 
-        num_slices = spark.sparkContext.defaultParallelism * 4
-        keys_rdd = spark.sparkContext.parallelize(keys, numSlices=num_slices)
-        redis_config = {
-            "host": self._host,
-            "port": self._port,
-            "password": self._password,
-        }
-
-        data_type = self.get_data_type()
-
-        def fetch_redis_data(iterator):
-            import redis
-            import json
-
-            partition_keys = list(iterator)
-            if not partition_keys:
-                return iter([])
-            r_sync = redis.Redis(**redis_config, decode_responses=True)
-            pipe = r_sync.pipeline(transaction=False)
-            for key in partition_keys:
-                if data_type == "hash":
-                    pipe.hgetall(key)
-                elif data_type in ["string", "json"]:
-                    pipe.get(key)
-
-            results = pipe.execute()
-
-            if data_type in ["string", "json"]:
-                return [json.loads(res) for res in results if res]
-            else:
-                return iter(results)
-
-        data_rdd = keys_rdd.mapPartitions(fetch_redis_data)
-        if data_rdd.isEmpty():
-            return []
-
-        df = data_rdd.toDF()
-        target_schema = self._get_spark_schema(table_name)
-        if not target_schema:
-            raise ValueError(f"No Spark schema for table {table_name}")
-
-        for field in target_schema.fields:
-            if field.name in df.columns:
-                df = df.withColumn(
-                    field.name, F.col(field.name).cast(field.dataType)
-                )  # noqa: E501
-
+        # 2. Apply WHERE
         if ast.args.get("where"):
             filter_cond = self._translate_expression_to_spark(
                 ast.args["where"].this
             )  # noqa: E501
             df = df.filter(filter_cond)
 
+        # 3. Apply GROUP BY
         group_by_cols = [
             c.this.name for c in ast.args.get("group").expressions
         ]  # noqa: E501
         grouped_df = df.groupBy(*group_by_cols)
 
+        # 4. Apply Aggregations
         agg_expressions = []
         final_cols = [e.alias_or_name for e in ast.expressions]
         for expr in ast.expressions:
             if isinstance(expr, exp.Alias) and isinstance(
                 expr.this, exp.AggFunc
             ):  # noqa: E501
-                agg_func = expr.this
-                alias = expr.alias_or_name
-                inner_expr = self._translate_expression_to_spark(agg_func.this)
-                agg_map = {
-                    exp.Sum: F.sum,
-                    exp.Avg: F.avg,
-                    exp.Count: F.count,
-                }
-                if type(agg_func) in agg_map:
-                    agg_expr = agg_map[type(agg_func)](inner_expr)
-                    if type(agg_func) in [exp.Sum, exp.Avg]:
-                        agg_expr = agg_expr.cast(DecimalType(38, 6))  # noqa
-                    agg_expressions.append(agg_expr.alias(alias))
+                # Use the main translator for aggregate functions
+                agg_expr = self._translate_expression_to_spark(expr.this)
+                agg_expressions.append(agg_expr.alias(expr.alias))
+            elif expr.is_star:
+                # Handle COUNT(*)
+                agg_expressions.append(F.count(F.lit(1)).alias("count_star"))
+                final_cols = ["count_star"]
+            else:
+                # Add group_by cols to the final select
+                col = self._translate_expression_to_spark(expr)
+                agg_expressions.append(col)
 
         agg_df = grouped_df.agg(*agg_expressions)
+
+        # 5. Apply ORDER BY
         if ast.args.get("order"):
-            order_cols = [c.this.name for c in ast.args["order"].expressions]
+            order_cols = []
+            for e in ast.args["order"].expressions:
+                # Use translator for consistency
+                col = self._translate_expression_to_spark(e.this)
+                direction = e.args.get("desc", False)
+                order_cols.append(col.desc() if direction else col.asc())
             agg_df = agg_df.orderBy(*order_cols)
 
+        # 6. Apply SELECT (final projection)
         final_df = agg_df.select(*final_cols)
         results = [row.asDict() for row in final_df.collect()]
         return [_camelize_keys(row) for row in results]
 
     async def aggregate(self, ast: exp.Select) -> List[Dict[str, Any]]:
+        logging.info("Aggregating on Redis")
         table_name = ast.find(exp.Table).name
         all_data = await self.get_all(table_name)
         result_row = {}
         if not all_data:
+            logging.info("No data to aggregate")
             return [{}]
         for expr in ast.expressions:
             if isinstance(expr, exp.Alias) and isinstance(
@@ -391,12 +602,25 @@ class RedisConnector(Connector):
             ):  # noqa: E501
                 agg_func, alias = expr.this, expr.alias_or_name
                 if isinstance(agg_func, exp.Count):
-                    result_row[alias] = len(all_data)
+                    if agg_func.this.is_star:
+                        result_row[alias] = len(all_data)
+                        continue
+                    # Handle COUNT(column)
+                    values = [
+                        row.get(agg_func.this.name)
+                        for row in all_data
+                        if row.get(agg_func.this.name) is not None
+                    ]
+                    result_row[alias] = len(values)
                     continue
+
+                # Handle SUM, AVG for expressions
                 values = [
                     self._evaluate_expression(agg_func.this, row)
                     for row in all_data  # noqa: E501
                 ]
+                values = [v for v in values if v is not None]
+
                 if isinstance(agg_func, exp.Sum):
                     result_row[alias] = sum(values)
                 elif isinstance(agg_func, exp.Avg):
@@ -445,6 +669,7 @@ class RedisConnector(Connector):
                 if self._options.get("include_data_type_in_pk", False):
                     key += f":{data_type}"
                 str_payload = {k: str(v) for k, v in payload.items()}
+                logging.info(f"Bulk insert in {data_type} mode with key {key}")
                 if data_type == "string":
                     await pipe.set(key, json.dumps(str_payload))
                 elif data_type == "json":
