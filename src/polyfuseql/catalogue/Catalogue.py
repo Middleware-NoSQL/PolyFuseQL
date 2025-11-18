@@ -59,7 +59,7 @@ class Catalogue(dict):
         required_keys = {"backend", "pk", "columns"}
         missing_keys = required_keys - schema.keys()
         if missing_keys:
-            keys = ", ".join(sorted(list(missing_keys)))
+            keys = ", ".join(sorted(missing_keys))
             msg = f"Invalid schema for table '{table_name}': "
             msg += f"Missing required key(s): {keys}. "
             msg += f"Please define them in '{self._schema_path}'."

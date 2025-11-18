@@ -91,7 +91,7 @@ def get_spark_session(database_jars: str = "Neo4j") -> Optional[SparkSession]:
         msg = "Spark session initialized with "
         msg += "Neo4j and Redis connectors. Master: "
         msg += f"{_spark_session.sparkContext.master}"
-        logging.info()
+        logging.info(msg)
         logging.info(
             "Spark UI available at: " f"{_spark_session.sparkContext.uiWebUrl}"
         )

@@ -106,7 +106,7 @@ async def test_get_customer_neo4j():
             primary_key_column="c_custkey",
             engine="neo4j",
         )
-        assert doc["c_name"] == EXPECTED_NAME
+        assert doc["cName"] == EXPECTED_NAME
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,7 @@ docker-compose up -d            # crea y popula
 
 docker-compose --profile postgres up -d
 docker-compose --profile postgres --profile redis up -d
+docker-compose --profile postgres --profile redis --profile neo4j up -d
 docker-compose --profile db up -d
 
 # Ver progreso de semillas
@@ -67,3 +68,5 @@ sudo systemctl restart docker
 
 # This finally removes the "ghost" network references.
 sudo docker network prune -f
+
+uvicorn polyfuseql.app.main:app --reload --log-level debug

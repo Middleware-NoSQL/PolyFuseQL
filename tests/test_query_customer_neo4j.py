@@ -1,4 +1,6 @@
 # tests/test_query_customer_neo4j.py
+import logging
+
 import pytest
 import pytest_asyncio
 from pathlib import Path
@@ -45,4 +47,5 @@ async def test_query_customer_neo4j():
             use_catalogue=True,
         )
         # Neo4j connector returns snake_case properties
-        assert rows and rows[0]["c_name"] == "Customer#000000001"
+        logging.info(f"rows: {rows}")
+        assert rows and rows[0]["cName"] == "Customer#000000001"

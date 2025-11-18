@@ -2,6 +2,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 import aiohttp
+import aiofiles
 from sqlglot import exp
 
 from polyfuseql.catalogue.Catalogue import Catalogue
@@ -271,8 +272,14 @@ class CassandraConnector(Connector):
         import csv
 
         try:
-            with open(file_path, "r", newline="") as f:
-                reader = csv.DictReader(f)
+            # SonarQube Fix (python:S7493): Use aiofiles for async file I/O
+            async with aiofiles.open(
+                file_path, mode="r", encoding="utf-8", newline=""
+            ) as f:
+                # Read the file content asynchronously
+                content = await f.read()
+                # csv.DictReader expects an iterator of lines
+                reader = csv.DictReader(content.splitlines())
                 for row in reader:
                     # Filter out None values from the row
                     clean_row = {k: v for k, v in row.items() if v is not None}

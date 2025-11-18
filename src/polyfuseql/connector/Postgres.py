@@ -4,6 +4,7 @@ import csv
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 import asyncpg
+import aiofiles
 
 from polyfuseql.catalogue.Catalogue import Catalogue
 from polyfuseql.config import settings
@@ -20,6 +21,7 @@ class PostgresConnector(Connector):
         return await self.query(ast.sql())
 
     async def get_all(self, entity: str) -> List[Dict[str, Any]]:
+        """Not needed for this connector"""
         pass
 
     def __init__(self, catalogue: Optional[Catalogue] = None) -> None:
@@ -164,16 +166,29 @@ class PostgresConnector(Connector):
             return value
 
         recs_ins = []
-        with open(file_path, "r") as f:
-            reader = csv.reader(f, delimiter="|")
+        # [FIX] Use aiofiles to read, but process as list of lines
+        async with aiofiles.open(
+            file_path, mode="r", encoding="utf-8", newline=""
+        ) as f:
+            content = await f.read()
+
+            # CRITICAL FIX: splitlines() ensures csv.reader
+            # gets a list of strings (lines),
+            # not a single huge string that it would iterate char-by-char.
+            reader = csv.reader(content.splitlines(), delimiter="|")
+
             for row in reader:
-                # TPC-H files have a trailing delimiter
-                row = row[:-1]
+                # TPC-H files often have a trailing delimiter,
+                # producing an empty string at the end.
+                # We remove it to match the column count.
+                if row and row[-1] == "":
+                    row = row[:-1]
+
                 if len(row) != len(ordered_cols):
-                    msg = f"Skipping malformed row in {t_name}: "
-                    msg += f"{row}"
+                    msg = f"Skipping malformed row in {t_name}: {row}"
                     logging.warning(msg)
                     continue
+
                 processed_row = tuple(
                     cast_value(val, col) for val, col in zip(row, ordered_cols)
                 )
