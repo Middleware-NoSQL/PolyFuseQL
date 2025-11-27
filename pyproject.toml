@@ -54,6 +54,30 @@ behave          = "^1.2.6"
 locust          = "^2.37.3"
 mkdocs-material = "^9.6.14"
 
+[tool.coverage.run]
+relative_files = true
+source = ["src/polyfuseql"]
+branch = true
+
+[tool.coverage.report]
+# Regexes for lines to exclude from consideration
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
+ignore_errors = true
+
+[tool.coverage.xml]
+output = "coverage.xml"
+
 [build-system]
 requires      = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"

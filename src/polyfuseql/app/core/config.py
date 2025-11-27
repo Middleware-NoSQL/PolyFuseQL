@@ -3,7 +3,7 @@
 Configuration management for the FastAPI application.
 """
 import os
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -42,9 +42,12 @@ class Settings(BaseSettings):
     MONGODB_PORT: int = int(os.getenv("MONGODB_PORT", 27018))
     MONGODB_DB: str = os.getenv("MONGODB_DB", "mydatabase")
 
-    class Config:
-        case_sensitive = True
-        env_file = ".env"
+    # Pydantic V2 Configuration
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=True,
+        extra="ignore",
+    )
 
 
 settings = Settings()

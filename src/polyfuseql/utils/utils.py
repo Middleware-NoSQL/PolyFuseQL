@@ -52,6 +52,8 @@ def _camelize_keys(obj: Dict[str, Any]) -> Dict[str, Any]:
             obj = json.loads(obj)
         except json.JSONDecodeError:
             return {}
+    if not obj:
+        return {}
     return {camel(k): v for k, v in obj.items()}
 
 

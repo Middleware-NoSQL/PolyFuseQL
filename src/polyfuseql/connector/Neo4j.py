@@ -5,7 +5,7 @@ import logging
 import sys
 import asyncio
 from datetime import date
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, AsyncGenerator
 
 import aiofiles  # Import aiofiles
@@ -16,6 +16,7 @@ from sqlglot import exp
 
 from polyfuseql.catalogue.Catalogue import Catalogue
 from polyfuseql.connector.Connector import Connector
+from polyfuseql.connector.SparkTranslator import SparkTranslator
 from polyfuseql.utils.spark_manager import get_spark_session
 from polyfuseql.utils.utils import _camelize_keys, get_pydantic_model
 
@@ -48,33 +49,18 @@ async def _execute_batch_insert(
     return summary.counters.nodes_created
 
 
-class Neo4jConnector(Connector):
+class Neo4jConnector(Connector, SparkTranslator):
     """
     Connector for Neo4j with PySpark for efficient aggregations.
     Uses the user-defined schema from the Catalogue.
     """
 
-    async def count(self, entity: str) -> int:
-        driver = self._get_driver()
-        async with driver.session() as s:
-            query = f"MATCH (n:{entity.capitalize()}) RETURN count(n) AS n"
-            result = await s.run(query)
-            rec = await result.single()
-            return rec["n"] if rec else 0
-
     def __init__(
         self,
         catalogue: Optional[Catalogue] = None,
-        options: Optional[Dict] = None,  # noqa:E501
+        options: Optional[Dict] = None,
     ) -> None:
         super().__init__(options=options, catalogue=catalogue)
-        from polyfuseql.config import settings
-
-        self._uri = f"bolt://{settings.neo4j.host}:{settings.neo4j.port}"
-        self._user = settings.neo4j.user
-        self._password = settings.neo4j.password
-        self._database = "neo4j"
-        self._driver: Optional[AsyncDriver] = None
 
         logging.basicConfig(
             level=logging.INFO,
@@ -82,14 +68,19 @@ class Neo4jConnector(Connector):
             stream=sys.stdout,
         )
 
+        from polyfuseql.config import settings
+
+        self._uri = f"bolt://{settings.neo4j.host}:{settings.neo4j.port}"
+        self._auth = (settings.neo4j.user, settings.neo4j.password)
+        self._driver: Optional[AsyncDriver] = None
+
     async def connect(self) -> None:
         if not self._driver:
             self._driver = AsyncGraphDatabase.driver(
-                self._uri,
-                auth=(self._user, self._password),
-                connection_timeout=600.0,  # noqa:E501
+                self._uri, auth=self._auth, connection_timeout=600.0
             )
             logging.info("Neo4j driver initialized.")
+            await self.ping()
 
     async def disconnect(self) -> None:
         if self._driver:
@@ -99,126 +90,72 @@ class Neo4jConnector(Connector):
 
     def _get_driver(self) -> AsyncDriver:
         if not self._driver:
-            # Auto-connect if driver is missing
-            # (common pattern in other connectors)
-            # However, since connect is async, we can't await it here easily
-            # without changing signature.
-            # For robustness, we assume the client calls connect(),
-            # or we raise error.
             raise ConnectionError(
                 "Neo4jConnector is not connected. Call connect() first."
             )
         return self._driver
 
     async def ping(self) -> bool:
-        if not self._driver:
-            return False
-        try:
-            await self._driver.verify_connectivity()
-            return True
-        except Exception:
-            return False
+        driver = self._get_driver()
+        async with driver.session() as s:
+            await s.run("RETURN 1")
+        return True
 
-    # --- [FIX] Parameter Sanitization Helper ---
-    @staticmethod
-    def _sanitize_value(value: Any) -> Any:
-        """
-        Converts types not supported by Neo4j driver (like Decimal)
-        into supported types (int, float, str).
-        """
-        if isinstance(value, Decimal):
-            # Convert to int if it's a whole number, else float
-            if value % 1 == 0:
-                return int(value)
-            return float(value)
-        if isinstance(value, dict):
-            return {
-                k: Neo4jConnector._sanitize_value(v) for k, v in value.items()
-            }  # noqa:E501
-        if isinstance(value, list):
-            return [Neo4jConnector._sanitize_value(v) for v in value]
-        return value
+    async def count(self, entity: str) -> int:
+        driver = self._get_driver()
+        async with driver.session() as s:
+            query = f"MATCH (n:{entity.capitalize()}) RETURN count(n) AS n"
+            result = await s.run(query)
+            rec = await result.single()
+            return rec["n"] if rec else 0
 
     async def get(
         self, entity: str, pk_col: str, pk_val: Any
-    ) -> Dict[str, Any]:  # noqa:E501
+    ) -> Dict[str, Any]:  # noqa:F501
         driver = self._get_driver()
-
-        # [FIX] Sanitize pk_val (convert Decimal -> int/float)
-        safe_pk_val = self._sanitize_value(pk_val)
-
-        query = f"MATCH (n:{entity.capitalize()}) "
-        query += f"WHERE n.{pk_col} = $pk_val "
-        query += "RETURN properties(n) as p"
-
-        async with driver.session(database=self._database) as s:
-            result = await s.run(query, pk_val=safe_pk_val)
-            record = await result.single()
-            if record:
-                data = record["p"]
-                # Convert Neo4j types (like neo4j.time.Date)
-                # back to Python types if needed
-                # Handle date objects for consistency
-                for k, v in data.items():
-                    if isinstance(v, neo_time.Date):
-                        data[k] = date(v.year, v.month, v.day)
-                return _camelize_keys(data)
-        return {}
+        async with driver.session() as s:
+            cypher_match = f"MATCH (n:{entity.capitalize()}) "
+            cypher_where = f"WHERE n.`{pk_col}` "
+            cypher = (
+                cypher_match
+                + cypher_where
+                + "= $pk_val RETURN properties(n) AS p LIMIT 1"
+            )
+            result = await s.run(cypher, pk_val=pk_val)
+            rec = await result.single()
+            return rec["p"] if rec and rec["p"] else {}
 
     async def insert(self, entity: str, payload: Dict[str, Any]) -> Any:
         driver = self._get_driver()
+        props = ", ".join(f"`{k}`: ${k}" for k in payload.keys())
 
-        # [FIX] Sanitize payload
-        safe_payload = self._sanitize_value(payload)
-
-        # Construct Cypher query
-        # "CREATE (n:Table $props)"
-        query = f"CREATE (n:{entity.capitalize()} $props) "
-        query += "RETURN properties(n) as p"
-        async with driver.session(database=self._database) as s:
-            result = await s.run(query, props=safe_payload)
-            record = await result.single()
-            if record:
-                return record["p"]
-        return {}
+        cypher = f"CREATE (n:{entity.capitalize()} {{ {props} }}) "
+        cypher += "RETURN properties(n) as p"
+        async with driver.session() as s:
+            result = await s.run(cypher, **payload)
+            rec = await result.single()
+            return rec["p"] if rec else {}
 
     async def update(
         self, entity: str, pk_col: str, pk_val: Any, payload: Dict[str, Any]
     ) -> int:
         driver = self._get_driver()
-
-        # [FIX] Sanitize inputs
-        safe_pk_val = self._sanitize_value(pk_val)
-        safe_payload = self._sanitize_value(payload)
-
-        # Construct Cypher SET clause dynamically is tricky
-        # with parameter map directly
-        # Better to use += operator for map update in Cypher
-        query = (
-            f"MATCH (n:{entity.capitalize()}) WHERE n.{pk_col} = $pk_val "
-            f"SET n += $payload RETURN count(n) as updated_count"
-        )
-
-        async with driver.session(database=self._database) as s:
-            result = await s.run(
-                query, pk_val=safe_pk_val, payload=safe_payload
-            )  # noqa:E501
+        async with driver.session() as s:
+            cypher = f"MATCH (n:{entity.capitalize()} "
+            cypher += f"{{`{pk_col}`: $pk_val}}) "
+            cypher += "SET n += $payload"
+            result = await s.run(cypher, pk_val=pk_val, payload=payload)
             summary = await result.consume()
-            # summary.counters.properties_set is more accurate for updates
             return summary.counters.properties_set
 
     async def delete(self, entity: str, pk_col: str, pk_val: Any) -> int:
         driver = self._get_driver()
-
-        # [FIX] Sanitize pk_val
-        safe_pk_val = self._sanitize_value(pk_val)
-
-        query = f"MATCH (n:{entity.capitalize()}) "
-        query += f"WHERE n.{pk_col} = $pk_val "
-        query += "DETACH DELETE n"
-
-        async with driver.session(database=self._database) as s:
-            result = await s.run(query, pk_val=safe_pk_val)
+        async with driver.session() as s:
+            cypher = (
+                f"MATCH (n:{entity.capitalize()} {{{pk_col}: $pk_val}}) "
+                "DETACH DELETE n"
+            )
+            result = await s.run(cypher, pk_val=pk_val)
             summary = await result.consume()
             return summary.counters.nodes_deleted
 
@@ -229,182 +166,22 @@ class Neo4jConnector(Connector):
         params: Optional[Dict] = None,
     ) -> List[Dict[str, Any]]:
         driver = self._get_driver()
-
-        # [FIX] Sanitize params if they exist
-        safe_params = self._sanitize_value(params) if params else {}
-
         cypher_query = f"MATCH (n:{entity.capitalize()}) "
         if where_clause:
             cypher_query += where_clause
         cypher_query += " RETURN properties(n) as p"
 
-        msg = f"Executing Cypher: {cypher_query} "
-        msg += f"with params: {safe_params}"
-        logging.info(msg)
-        results = []
-        async with driver.session(database=self._database) as s:
-            result = await s.run(cypher_query, **safe_params)
-            async for record in result:
-                node = record["p"]
-                # Basic type conversion
-                for k, v in node.items():
-                    if isinstance(v, neo_time.Date):
-                        node[k] = date(v.year, v.month, v.day)
-                results.append(_camelize_keys(node))
-        return results
+        logging.info(f"Executing Cypher: {cypher_query} with params: {params}")
 
-    # --- Bulk Insert Refactoring ---
-
-    def _process_row_for_neo4j(
-        self, line: List[str], cols: List[str], dynamic_model: Any
-    ) -> Optional[Dict[str, Any]]:
-        """
-        [Sonar Refactor] Processes a single CSV line for Neo4j bulk insert.
-        This helper reduces the cognitive complexity of the batch processor.
-        Returns a processed dict or None if validation fails or
-         the row is empty.
-        """
-        if not line or len(line) < len(cols):
-            return None
-        try:
-            row_dict = dict(zip(cols, line[: len(cols)]))
-            validated_data = dynamic_model(**row_dict)
-            model_dict = validated_data.model_dump()
-
-            # [CRITICAL FIX] Convert types for Neo4j driver using sanitize
-            # This handles Decimals (converting to float/int)
-            sanitized_dict = self._sanitize_value(model_dict)
-
-            # Handle date objects specifically for Neo4j driver compatibility
-            for key, value in sanitized_dict.items():
-                if isinstance(value, date) and not isinstance(
-                    value, neo_time.Date
-                ):  # noqa:E501
-                    sanitized_dict[key] = neo_time.Date.from_native(value)
-
-            return sanitized_dict
-        except ValidationError as e:
-            msg = f"Skipping row due to validation error: {line}. Error: {e}"
-            logging.warning(msg)
-            return None
-
-    async def _process_csv_batch(
-        self,
-        file_path: str,
-        cols: List[str],
-        dynamic_model: Any,
-        batch_size: int,
-    ) -> AsyncGenerator[List[Dict[str, Any]], None]:
-        """
-        [Sonar Refactor] Asynchronously reads a CSV file, validates rows,
-        and yields batches of processed data.
-        Fixes S3776 (Cognitive Complexity) and S7493 (Async file I/O).
-        """
-        batch = []
-        try:
-            # [FIX] Use aiofiles correctly with splitlines()
-            # as per Postgres fix
-            async with aiofiles.open(
-                file_path, "r", encoding="utf-8"
-            ) as f:  # noqa:E501
-                content = await f.read()
-                reader = csv.reader(content.splitlines(), delimiter="|")
-
-                for line in reader:
-                    # TPC-H trailing delimiter check
-                    if line and line[-1] == "":
-                        line = line[:-1]
-
-                    # Delegate row processing to the new helper function
-                    processed_row = self._process_row_for_neo4j(
-                        line, cols, dynamic_model
-                    )
-
-                    if processed_row:
-                        batch.append(processed_row)
-
-                    if len(batch) >= batch_size:
-                        yield batch
-                        batch = []
-
-                if batch:
-                    yield batch
-
-        except FileNotFoundError:
-            logging.error(f"File not found: {file_path}")
-            raise
-        except Exception as e:
-            logging.error(f"Error during CSV processing for {file_path}: {e}")
-            raise
-
-    async def bulk_insert(
-        self, table_name: str, file_path: str, batch_size: int = 5000
-    ) -> int:
-        """
-        Bulk inserts data from a file into the specified table.
-        This function has been refactored to reduce cognitive complexity
-        by delegating row processing to `_process_csv_batch`.
-        """
-        driver = self._get_driver()
-        schema = self.catalogue.get_schema(table_name)
-        if not schema:
-            msg = f"No schema definition found for table: {table_name}"
-            raise ValueError(msg)
-
-        cols = list(schema["columns"].keys())
-        label = table_name.capitalize()
-        dynamic_model = get_pydantic_model(table_name, schema)
-
-        # Clear the table first
         async with driver.session() as s:
-            await s.run(f"MATCH (n:{label}) DETACH DELETE n")
-
-        # Prepare the Cypher query
-        props_str = ", ".join([f"`{c}`: row.`{c}`" for c in cols])
-        cypher_query = f"""
-        UNWIND $rows AS row
-        CREATE (n:{label} {{ {props_str} }})
-        """
-
-        total_inserted = 0
-        # Use the async generator to process batches
-        async for batch in self._process_csv_batch(
-            file_path, cols, dynamic_model, batch_size
-        ):
-            if batch:
-                async with driver.session() as s:
-                    nodes_created = await s.execute_write(
-                        _execute_batch_insert, cypher_query, batch
-                    )
-                    total_inserted += nodes_created
-
-        return total_inserted
-
-    # --- PySpark Integration for Joins/Aggregations ---
-
-    def _get_spark_schema(self, table_name: str) -> "StructType":
-        sch_def = self.catalogue.get_schema(table_name)
-        if not sch_def:
-            msg = "No schema definition found for table: "
-            msg += f"{table_name}"
-            raise ValueError(msg)
-        fields = []
-        for c_name, c_type_str in sch_def["columns"].items():
-            if c_type_str == "date":
-                fields.append(StructField(c_name, DateType(), True))
-            elif "decimal" in c_type_str:
-                fields.append(
-                    StructField(c_name, DecimalType(38, 10), True)
-                )  # noqa:F501
-            else:
-                fields.append(StructField(c_name, StringType(), True))
-        return StructType(fields)
+            result = await s.run(cypher_query, **(params or {}))
+            return [rec["p"] async for rec in result]
 
     async def _load_table_to_spark_df(
         self, table_name: str, spark_session
     ) -> "DataFrame":
         """
-        Loads a single table from Neo4j into a Spark DataFrame.
+        [Sonar Refactor] Loads a single table from Neo4j into a Spark DataFrame
         This helper function is called by join(), group_by(), and aggregate()
         to eliminate code duplication.
         """
@@ -428,8 +205,9 @@ class Neo4jConnector(Connector):
                 read_schema_fields.append(field)
                 return_expressions.append(f"n.{field.name} AS {field.name}")
         read_schema = StructType(read_schema_fields)
-        cypher_query = f"MATCH (n:{label}) "
-        cypher_query += f"RETURN {', '.join(return_expressions)}"
+        label_str = f"MATCH (n:{label})"
+        return_str = f"RETURN {', '.join(return_expressions)}"
+        cypher_query = f"{label_str} {return_str}"
 
         # 2. Define the synchronous Spark-loading function
         def _load_sync() -> "DataFrame":
@@ -457,9 +235,9 @@ class Neo4jConnector(Connector):
                 return spark_session.createDataFrame([], spark_schema)
 
         # 4. Bridge from async to sync Spark execution
-        msg = f"Loading table '{table_name}' "
-        msg += "using `spark-neo4j` connector."
-        logging.info(msg)
+        logging.info(
+            f"Loading table '{table_name}' using `spark-neo4j` connector."
+        )  # noqa:E501
         df = await asyncio.to_thread(_load_sync)
         return df
 
@@ -650,136 +428,134 @@ class Neo4jConnector(Connector):
 
         return [_camelize_keys(row) for row in results]
 
-    # --- [SONARQUBE S3776 FIX] ---
-    # The following methods refactor _translate_expression_to_spark
-    # to reduce Cognitive Complexity from 22 to a much lower number.
-
-    def _translate_alias(self, expression: exp.Alias):
-        """Translates an ALIAS expression (e.g., col AS c)."""
-        inner_expr = self._translate_expression_to_spark(expression.this)
-        return inner_expr.alias(expression.alias)
-
-    def _translate_column(self, expression: exp.Column):
-        """Translates a COLUMN expression (e.g., t1.col or col)."""
-        if expression.table:
-            return F.col(f"{expression.table}.{expression.name}")
-        return F.col(expression.name)
-
-    def _translate_literal(self, expression: exp.Literal):
-        """Translates a LITERAL expression (e.g., 'foo', 123, 12.5)."""
-        val = expression.this
+    def _process_row_for_neo4j(
+        self, line: List[str], cols: List[str], dynamic_model: Any
+    ) -> Optional[Dict[str, Any]]:
+        """
+        [Sonar Refactor] Processes a single CSV line for Neo4j bulk insert.
+        This helper reduces the cognitive complexity of the batch processor.
+        Returns a processed dict or None if validation fails or the row is
+        empty.
+        """
+        if not line or len(line) < len(cols):
+            return None
         try:
-            # Try to cast to Decimal for numeric literals
-            return (
-                F.lit(Decimal(val)) if not expression.is_string else F.lit(val)
-            )  # noqa:E501
-        except InvalidOperation:
-            # Fallback to string literal
-            return F.lit(val)
+            row_dict = dict(zip(cols, line[: len(cols)]))
+            validated_data = dynamic_model(**row_dict)
+            model_dict = validated_data.model_dump()
 
-    def _translate_paren(self, expression: exp.Paren):
-        """Translates a PAREN expression (e.g., (1 + 1))."""
-        return self._translate_expression_to_spark(expression.this)
+            # Convert types for Neo4j driver
+            for key, value in model_dict.items():
+                if isinstance(value, date):
+                    model_dict[key] = neo_time.Date.from_native(value)
+                if isinstance(value, Decimal):
+                    model_dict[key] = float(value)
 
-    def _translate_binary(self, expression: exp.Binary):
-        """Translates all BINARY expressions (e.g., +, -, =, AND, OR)."""
-        left = self._translate_expression_to_spark(expression.left)
-        right = self._translate_expression_to_spark(expression.right)
+            return model_dict
+        except ValidationError as e:
+            msg = f"Skipping row due to validation error: {line}. Error: {e}"
+            logging.warning(msg)
+            return None
 
-        # Using a map is cleaner than a large if/elif block
-        op_map = {
-            exp.Mul: lambda a, b: a * b,
-            exp.Sub: lambda a, b: a - b,
-            exp.Add: lambda a, b: a + b,
-            exp.Div: lambda a, b: a / b,
-            exp.EQ: lambda a, b: a == b,
-            exp.NEQ: lambda a, b: a != b,
-            exp.GT: lambda a, b: a > b,
-            exp.GTE: lambda a, b: a >= b,
-            exp.LT: lambda a, b: a < b,
-            exp.LTE: lambda a, b: a <= b,
-            exp.And: lambda a, b: a & b,
-            exp.Or: lambda a, b: a | b,
-        }
-
-        op_func = op_map.get(type(expression))
-        if op_func:
-            return op_func(left, right)
-
-        raise NotImplementedError(
-            f"Unsupported binary operator: {type(expression)}"
-        )  # noqa:E501
-
-    def _translate_agg_func(self, expression: exp.AggFunc):
-        """Translates all AGGREGATE expressions (e.g., SUM, COUNT)."""
-        inner_expr = self._translate_expression_to_spark(expression.this)
-
-        agg_map = {
-            exp.Sum: F.sum,
-            exp.Avg: F.avg,
-            exp.Count: F.count,
-            exp.Min: F.min,
-            exp.Max: F.max,
-        }
-
-        agg_func = agg_map.get(type(expression))
-        if not agg_func:
-            raise NotImplementedError(
-                f"Unsupported aggregate function: {type(expression)}"
-            )
-
-        agg_expr = agg_func(inner_expr)
-        if type(expression) in [exp.Sum, exp.Avg]:
-            # Cast aggregates to a high-precision decimal
-            agg_expr = agg_expr.cast(DecimalType(38, 6))
-
-        return agg_expr
-
-    def _translate_cast(self, expression: exp.Cast):
-        """Translates a CAST expression (e.g., CAST(col AS DATE))."""
-        if expression.to.this == exp.DataType.Type.DATE:
-            return F.to_date(
-                self._translate_expression_to_spark(expression.this)
-            )  # noqa:E501
-
-        raise NotImplementedError(
-            f"Unsupported CAST type: {expression.to.this}"
-        )  # noqa:E501
-
-    def _translate_star(self, expression: exp.Star):
-        """Translates a STAR expression (e.g., COUNT(*))."""
-        return F.lit(1)
-
-    def _translate_expression_to_spark(self, expression: exp.Expression):
+    async def _process_csv_batch(
+        self,
+        file_path: str,
+        cols: List[str],
+        dynamic_model: Any,
+        batch_size: int,
+    ) -> AsyncGenerator[List[Dict[str, Any]], None]:
         """
-        [Sonar Refactor]
-        Translates a sqlglot Expression into a PySpark Column expression.
-        Delegates to helper methods to reduce cognitive complexity.
+        [Sonar Refactor] Asynchronously reads a CSV file, validates rows,
+        and yields batches of processed data.
+        Fixes S3776 (Cognitive Complexity) and S7493 (Async file I/O).
         """
-        # --- Dispatcher ---
-        # We check base classes first (Binary, AggFunc)
-        # before checking specific concrete types.
+        batch = []
+        try:
+            async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
+                # Read lines asynchronously and split for the csv reader
+                content = await f.read()
+                reader = csv.reader(content.splitlines(), delimiter="|")
 
-        if isinstance(expression, exp.Binary):
-            return self._translate_binary(expression)
+                for line in reader:
+                    # Delegate row processing to the new helper function
+                    processed_row = self._process_row_for_neo4j(
+                        line, cols, dynamic_model
+                    )
 
-        if isinstance(expression, exp.AggFunc):
-            return self._translate_agg_func(expression)
+                    if processed_row:
+                        batch.append(processed_row)
 
-        translator_map = {
-            exp.Alias: self._translate_alias,
-            exp.Column: self._translate_column,
-            exp.Literal: self._translate_literal,
-            exp.Paren: self._translate_paren,
-            exp.Cast: self._translate_cast,
-            exp.Star: self._translate_star,
-        }
+                    if len(batch) >= batch_size:
+                        yield batch
+                        batch = []
 
-        translator = translator_map.get(type(expression))
+                if batch:
+                    yield batch
 
-        if translator:
-            return translator(expression)
+        except FileNotFoundError:
+            logging.error(f"File not found: {file_path}")
+            raise
+        except Exception as e:
+            logging.error(f"Error during CSV processing for {file_path}: {e}")
+            raise
 
-        msg = "Unsupported SQL expression for Spark translation: "
-        msg += f"{type(expression)}"
-        raise NotImplementedError(msg)
+    async def bulk_insert(
+        self, table_name: str, file_path: str, batch_size: int = 5000
+    ) -> int:
+        """
+        [Sonar Refactor] Bulk inserts data from a file into the specified table
+        This function has been refactored to reduce cognitive complexity
+        by delegating row processing to `_process_csv_batch`.
+        """
+        driver = self._get_driver()
+        schema = self.catalogue.get_schema(table_name)
+        if not schema:
+            msg = f"No schema definition found for table: {table_name}"
+            raise ValueError(msg)
+
+        cols = list(schema["columns"].keys())
+        label = table_name.capitalize()
+        dynamic_model = get_pydantic_model(table_name, schema)
+
+        # Clear the table first
+        async with driver.session() as s:
+            await s.run(f"MATCH (n:{label}) DETACH DELETE n")
+
+        # Prepare the Cypher query
+        props_str = ", ".join([f"`{c}`: row.`{c}`" for c in cols])
+        cypher_query = f"""
+        UNWIND $rows AS row
+        CREATE (n:{label} {{ {props_str} }})
+        """
+
+        total_inserted = 0
+        # Use the async generator to process batches
+        async for batch in self._process_csv_batch(
+            file_path, cols, dynamic_model, batch_size
+        ):
+            if batch:
+                async with driver.session() as s:
+                    nodes_created = await s.execute_write(
+                        _execute_batch_insert, cypher_query, batch
+                    )
+                    total_inserted += nodes_created
+
+        return total_inserted
+
+    def _get_spark_schema(self, table_name: str) -> "StructType":
+        sch_def = self.catalogue.get_schema(table_name)
+        if not sch_def:
+            msg = "No schema definition found for table: "
+            msg += f"{table_name}"
+            raise ValueError(msg)
+        fields = []
+        for c_name, c_type_str in sch_def["columns"].items():
+            if c_type_str == "date":
+                fields.append(StructField(c_name, DateType(), True))
+            elif "decimal" in c_type_str:
+                fields.append(
+                    StructField(c_name, DecimalType(38, 10), True)
+                )  # noqa:F501
+            else:
+                fields.append(StructField(c_name, StringType(), True))
+        return StructType(fields)

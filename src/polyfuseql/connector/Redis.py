@@ -1,23 +1,3 @@
-"""
-Redis Connector for PolyFuseQL
-
-This module provides a robust, production-ready connector for Redis,
-adhering to our coding standards.
-
-Fixes applied:
-- [CRITICAL FIX 2025-11-18] Made _fetch_redis_data_fallback
-and _process_redis_results static
-  to resolve PySpark pickling error (TypeError:
-  cannot pickle '_queue.SimpleQueue' object).
-  The issue was caused by capturing 'self'
-  (which contains the async Redis client) in the
-  RDD closure.
-- Implemented `group_by` using PySpark (parity with Neo4j).
-- Refactored complex methods (Cognitive Complexity reduction).
-- Removed unsafe 'literal_eval'.
-- Standardized logging and error handling.
-"""
-
 import csv
 import json
 import logging
@@ -33,6 +13,7 @@ from sqlglot import exp
 from polyfuseql.catalogue.Catalogue import Catalogue
 from polyfuseql.config import settings
 from polyfuseql.connector.Connector import Connector
+from polyfuseql.connector.SparkTranslator import SparkTranslator
 from polyfuseql.utils.spark_manager import get_spark_session
 from polyfuseql.utils.utils import get_pydantic_model, _camelize_keys
 
@@ -52,7 +33,7 @@ except ImportError:
     SPARK_AVAILABLE = False
 
 
-class RedisConnector(Connector):
+class RedisConnector(Connector, SparkTranslator):
     """Connector for Redis with configurable data type strategies."""
 
     def __init__(
@@ -236,15 +217,19 @@ class RedisConnector(Connector):
         if not keys:
             logging.info("Not keys to get")
             return []
+
+        # [FIX] Pipeline creation is synchronous
         pipe = r.pipeline()
         for key in keys:
             logging.info(f"get-key: {key}")
             if self.get_data_type() == "hash":
-                # Use pipeline.hgetall()
+                # [FIX] Do not await pipeline queuing methods
                 pipe.hgetall(key)
             else:
-                # Use pipeline.get()
+                # [FIX] Do not await pipeline queuing methods
                 pipe.get(key)
+
+        # [FIX] Only await the execution
         results = await pipe.execute()
         logging.info(f"Results: {results}")
 
@@ -290,119 +275,6 @@ class RedisConnector(Connector):
             for col_name, col_type in schema_def["columns"].items()
         ]
         return StructType(fields)
-
-    # --- [SONARQUBE S3776 FIX] ---
-    # Refactored _translate_expression_to_spark to reduce complexity.
-
-    def _translate_alias(self, expression: exp.Alias):
-        """Translates an ALIAS expression (e.g., col AS c)."""
-        inner_expr = self._translate_expression_to_spark(expression.this)
-        return inner_expr.alias(expression.alias)
-
-    def _translate_column(self, expression: exp.Column):
-        """Translates a COLUMN expression (e.g., t1.col or col)."""
-        if expression.table:
-            return F.col(f"{expression.table}.{expression.name}")
-        return F.col(expression.name)
-
-    def _translate_literal(self, expression: exp.Literal):
-        """Translates a LITERAL expression (e.g., 'foo', 123, 12.5)."""
-        val = expression.this
-        try:
-            return (
-                F.lit(Decimal(val)) if not expression.is_string else F.lit(val)
-            )  # noqa:E501
-        except InvalidOperation:
-            return F.lit(val)
-
-    def _translate_paren(self, expression: exp.Paren):
-        """Translates a PAREN expression (e.g., (1 + 1))."""
-        return self._translate_expression_to_spark(expression.this)
-
-    def _translate_binary(self, expression: exp.Binary):
-        """Translates all BINARY expressions (e.g., +, -, =, AND, OR)."""
-        left = self._translate_expression_to_spark(expression.left)
-        right = self._translate_expression_to_spark(expression.right)
-        op_map = {
-            exp.Mul: lambda a, b: a * b,
-            exp.Sub: lambda a, b: a - b,
-            exp.Add: lambda a, b: a + b,
-            exp.Div: lambda a, b: a / b,
-            exp.EQ: lambda a, b: a == b,
-            exp.NEQ: lambda a, b: a != b,
-            exp.GT: lambda a, b: a > b,
-            exp.GTE: lambda a, b: a >= b,
-            exp.LT: lambda a, b: a < b,
-            exp.LTE: lambda a, b: a <= b,
-            exp.And: lambda a, b: a & b,
-            exp.Or: lambda a, b: a | b,
-        }
-        op_func = op_map.get(type(expression))
-        if op_func:
-            return op_func(left, right)
-        raise NotImplementedError(
-            f"Unsupported binary operator: {type(expression)}"
-        )  # noqa:E501
-
-    def _translate_agg_func(self, expression: exp.AggFunc):
-        """Translates all AGGREGATE expressions (e.g., SUM, COUNT)."""
-        inner_expr = self._translate_expression_to_spark(expression.this)
-        agg_map = {
-            exp.Sum: F.sum,
-            exp.Avg: F.avg,
-            exp.Count: F.count,
-            exp.Min: F.min,
-            exp.Max: F.max,
-        }
-        agg_func = agg_map.get(type(expression))
-        if not agg_func:
-            raise NotImplementedError(
-                f"Unsupported aggregate function: {type(expression)}"
-            )
-        agg_expr = agg_func(inner_expr)
-        if type(expression) in [exp.Sum, exp.Avg]:
-            agg_expr = agg_expr.cast(DecimalType(38, 6))
-        return agg_expr
-
-    def _translate_cast(self, expression: exp.Cast):
-        """Translates a CAST expression (e.g., CAST(col AS DATE))."""
-        if expression.to.this == exp.DataType.Type.DATE:
-            return F.to_date(
-                self._translate_expression_to_spark(expression.this)
-            )  # noqa:E501
-        raise NotImplementedError(
-            f"Unsupported CAST type: {expression.to.this}"
-        )  # noqa:E501
-
-    def _translate_star(self, expression: exp.Star):
-        """Translates a STAR expression (e.g., COUNT(*))."""
-        return F.lit(1)
-
-    def _translate_expression_to_spark(self, expression: exp.Expression):
-        """
-        [Sonar Refactor]
-        Translates a sqlglot Expression into a PySpark Column expression.
-        Delegates to helper methods to reduce cognitive complexity.
-        """
-        if isinstance(expression, exp.Binary):
-            return self._translate_binary(expression)
-        if isinstance(expression, exp.AggFunc):
-            return self._translate_agg_func(expression)
-
-        translator_map = {
-            exp.Alias: self._translate_alias,
-            exp.Column: self._translate_column,
-            exp.Literal: self._translate_literal,
-            exp.Paren: self._translate_paren,
-            exp.Cast: self._translate_cast,
-            exp.Star: self._translate_star,
-        }
-        translator = translator_map.get(type(expression))
-        if translator:
-            return translator(expression)
-        msg = "Unsupported SQL expression for Spark translation: "
-        msg += f"{type(expression)}"
-        raise NotImplementedError(msg)
 
     # --- [SONARQUBE S3776 FIX & PYSPARK PICKLING FIX] ---
     # These methods are now STATIC to prevent capturing 'self'
@@ -500,10 +372,9 @@ class RedisConnector(Connector):
     async def _load_table_fallback_spark(
         self, table_name: str, spark_session, target_schema, data_type
     ) -> "DataFrame":
-        """Loads 'string' or 'json' tables
-        using the non-scalable mapPartitions method."""
-        msg = "Using non-scalable `mapPartitions` loader "
-        msg += f"for data_type '{data_type}'."
+        """Loads 'string' or 'json' tables using the
+        non-scalable mapPartitions method."""
+        msg = f"Using non-scalable `mapPartitions` loader for data_type '{data_type}'."
         msg += " This will be slow and may crash on large tables."
         logging.warning(msg)
 
@@ -525,12 +396,9 @@ class RedisConnector(Connector):
         if not keys:
             return spark_session.createDataFrame([], target_schema)
 
-        keys_rdd = spark_session.sparkContext.parallelize(
-            keys, numSlices=num_slices
-        )  # noqa:E501
+        keys_rdd = spark_session.sparkContext.parallelize(keys, numSlices=num_slices)
 
-        # [CRITICAL FIX] Use RedisConnector class
-        # explicitly to avoid capturing 'self'
+        # [CRITICAL FIX] Use RedisConnector class explicitly to avoid capturing 'self'
         data_rdd = keys_rdd.mapPartitions(
             lambda it: RedisConnector._fetch_redis_data_fallback(
                 it, redis_config, data_type
@@ -543,9 +411,7 @@ class RedisConnector(Connector):
         df = data_rdd.toDF()
         for field in target_schema.fields:
             if field.name in df.columns:
-                df = df.withColumn(
-                    field.name, F.col(field.name).cast(field.dataType)
-                )  # noqa:E501
+                df = df.withColumn(field.name, F.col(field.name).cast(field.dataType))
         return df
 
     async def _load_table_to_spark_df(
@@ -583,9 +449,7 @@ class RedisConnector(Connector):
             join_table_alias = join_table_expr.alias_or_name
 
             df_to_join = (
-                await self._load_table_to_spark_df(
-                    join_table_name, spark_session
-                )  # noqa:E501
+                await self._load_table_to_spark_df(join_table_name, spark_session)
             ).alias(join_table_alias)
 
             join_condition = self._translate_expression_to_spark(
@@ -593,9 +457,7 @@ class RedisConnector(Connector):
             )
             join_type = join_expr.args.get("kind", "INNER").lower()
 
-            joined_df = joined_df.join(
-                df_to_join, on=join_condition, how=join_type
-            )  # noqa:E501
+            joined_df = joined_df.join(df_to_join, on=join_condition, how=join_type)
         return joined_df
 
     def _apply_spark_where(
@@ -643,16 +505,12 @@ class RedisConnector(Connector):
         from_table_name = from_table_expr.this.name
         from_table_alias = from_table_expr.alias_or_name
 
-        df = (
-            await self._load_table_to_spark_df(from_table_name, spark)
-        ).alias(  # noqa:E501
+        df = (await self._load_table_to_spark_df(from_table_name, spark)).alias(
             from_table_alias
         )
 
         # 2. Apply Joins, Where, Order, Limit
-        df = await self._apply_spark_joins(
-            df, ast.args.get("joins", []), spark
-        )  # noqa:E501
+        df = await self._apply_spark_joins(df, ast.args.get("joins", []), spark)
         df = self._apply_spark_where(df, ast.args.get("where"))
         df = self._apply_spark_order_by(df, ast.args.get("order"))
         df = self._apply_spark_limit(df, ast.args.get("limit"))
@@ -683,8 +541,7 @@ class RedisConnector(Connector):
 
         # [SONAR REFACTOR S3776] Replaced loop with list comprehension
         agg_expressions = [
-            self._translate_expression_to_spark(expr)
-            for expr in ast.expressions  # noqa:E501
+            self._translate_expression_to_spark(expr) for expr in ast.expressions
         ]
 
         return grouped_df.agg(*agg_expressions)
@@ -719,9 +576,7 @@ class RedisConnector(Connector):
 
     # --- [SONARQUBE S3776 FIX FOR aggregate] ---
 
-    def _handle_empty_aggregate_result(
-        self, ast: exp.Select
-    ) -> List[Dict[str, Any]]:  # noqa:E501
+    def _handle_empty_aggregate_result(self, ast: exp.Select) -> List[Dict[str, Any]]:
         """
         [Sonar Refactor] Helper for aggregate:
         Returns a default empty/zero state when no data is found.
@@ -748,9 +603,7 @@ class RedisConnector(Connector):
         # Handle COUNT(column)
         col_name = agg_func.this.name
         values = [
-            row.get(col_name)
-            for row in all_data
-            if row.get(col_name) is not None  # noqa:E501
+            row.get(col_name) for row in all_data if row.get(col_name) is not None
         ]
         return len(values)
 
@@ -762,9 +615,7 @@ class RedisConnector(Connector):
         Calculates SUM(expr) or AVG(expr).
         """
         # Evaluate the expression for all rows
-        values = [
-            self._evaluate_expression(agg_func.this, row) for row in all_data
-        ]  # noqa:E501
+        values = [self._evaluate_expression(agg_func.this, row) for row in all_data]
         # Filter out None values which might result from failed lookups
         values = [v for v in values if v is not None]
 
@@ -790,10 +641,7 @@ class RedisConnector(Connector):
         result_row = {}
         for expr in ast.expressions:
             # Ensure we are dealing with an aliased aggregate function
-            if not (
-                isinstance(expr, exp.Alias)
-                and isinstance(expr.this, exp.AggFunc)  # noqa:E501
-            ):  # noqa:E501
+            if not (isinstance(expr, exp.Alias) and isinstance(expr.this, exp.AggFunc)):
                 continue
 
             agg_func, alias = expr.this, expr.alias_or_name
@@ -802,9 +650,7 @@ class RedisConnector(Connector):
                 result_row[alias] = self._handle_agg_count(agg_func, all_data)
 
             elif isinstance(agg_func, (exp.Sum, exp.Avg)):
-                result_row[alias] = self._handle_agg_sum_avg(
-                    agg_func, all_data
-                )  # noqa:E501
+                result_row[alias] = self._handle_agg_sum_avg(agg_func, all_data)
 
             # Note: MIN/MAX not implemented in original, so not added here.
 
@@ -818,8 +664,7 @@ class RedisConnector(Connector):
     ) -> Optional[Dict[str, Any]]:
         """
         [Sonar Refactor] Processes a single CSV line for Redis bulk insert.
-        Returns a processed dict or None if validation fails or
-        the row is empty.
+        Returns a processed dict or None if validation fails or the row is empty.
         """
         if not line or len(line) < len(cols):
             return None
@@ -865,8 +710,7 @@ class RedisConnector(Connector):
 
     async def bulk_insert(self, table_name: str, file_path: str) -> int:
         """
-        [Sonar Refactor] Bulk inserts data from a file into
-        the specified table.
+        [Sonar Refactor] Bulk inserts data from a file into the specified table.
         Uses async I/O and delegates row processing to helpers.
         """
         r = self._get_client()
@@ -941,9 +785,7 @@ class RedisConnector(Connector):
         if op_func:
             return op_func(left_val, right_val)
 
-        msg = "Unsupported binary expression: "
-        msg += f"{type(expression)}"
-        raise NotImplementedError(msg)
+        raise NotImplementedError(f"Unsupported binary expression: {type(expression)}")
 
     def _evaluate_expression(self, expression, row_data):
         """
