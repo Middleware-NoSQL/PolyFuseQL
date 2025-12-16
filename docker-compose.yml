@@ -17,13 +17,14 @@ services:
     volumes:
       - ./docker/tpch-data:/data
     entrypoint: /bin/sh
+    # Updated command to use the Python CLI tool 'tpchgen'
+    # Arguments (--scale, --output) are compatible with the Rust version
     command: >
-      -c "cp /usr/local/bin/dists.dss /data && 
-          cd /data && 
-          /usr/local/bin/dbgen -s 0.01 -f -v && 
-          chown ${UID:-1000}:${GID:-1000} ./*"
+      -c "tpchgen-cli --scale-factor 0.01 --output-dir /data && 
+          chown ${UID:-1000}:${GID:-1000} /data/*"
     networks:
       - polyfuse-net
+
 
   # ────────────── PostgreSQL ────────────── #
   postgres:
