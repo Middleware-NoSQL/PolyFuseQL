@@ -59,7 +59,13 @@ sudo docker rm -f \
   polyfuseql_mongo_translator \
   polyfuseql_cassandra_translator \
   polyfuseql_cassandra_translator_auth \
-  polyfuseql_cassandra_translator_permission
+  polyfuseql_cassandra_translator_permission \
+  polyfuseql_app \
+  polyfuseql_loader_postgres_client \
+  polyfuseql_loader_neo4j_client \
+  polyfuseql_loader_redis_client \
+  polyfuseql_loader_mongo_client \
+  polyfuseql_loader_cassandra_client
 
 # This cleans up any other resources Docker thinks belong to this project.
 sudo docker compose down --remove-orphans -v
@@ -69,5 +75,7 @@ sudo systemctl restart docker
 
 # This finally removes the "ghost" network references.
 sudo docker network prune -f
+
+sudo docker stop $(sudo docker ps -q) && sudo docker rm -f polyfuseql_tpch_dbgen polyfuseql_pg_tpch polyfuseql_redis_kv polyfuseql_neo4j_graph polyfuseql_mongodb polyfuseql_cassandra polyfuseql_mongo_translator polyfuseql_cassandra_translator polyfuseql_cassandra_translator_auth polyfuseql_cassandra_translator_permission polyfuseql_app polyfuseql_loader_postgres_client polyfuseql_loader_neo4j_client polyfuseql_loader_redis_client polyfuseql_loader_mongo_client polyfuseql_loader_cassandra_client; sudo docker compose down --remove-orphans -v; sudo systemctl restart docker; sudo docker network prune -f
 
 uvicorn polyfuseql.app.main:app --reload --log-level debug
