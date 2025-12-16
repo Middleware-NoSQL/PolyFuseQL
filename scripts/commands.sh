@@ -14,6 +14,7 @@ docker network prune            # borra redes no usadas
 docker-compose up -d            # crea y popula
 
 docker-compose --profile postgres up -d
+docker-compose --profile postgres up -d --build
 docker-compose --profile postgres --profile redis up -d
 docker-compose --profile postgres --profile redis --profile neo4j up -d
 docker-compose --profile db up -d

@@ -1,4 +1,5 @@
-"""polyfuseql.config
+"""
+polyfuseql.config
 ~~~~~~~~~~~~~~~~~~~~~
 Centralized configuration management using Pydantic settings.
 
@@ -87,14 +88,23 @@ class AppSettings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_nested_delimiter="__", env_file=".env", extra="ignore"
+        # Changed to "_" so variables like POSTGRES_HOST map to postgres.host
+        env_nested_delimiter="_",
+        env_file=".env",
+        extra="ignore",
+        case_sensitive=False,
     )
 
     postgres: PostgresSettings = Field(default_factory=PostgresSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     neo4j: Neo4jSettings = Field(default_factory=Neo4jSettings)
-    mongodb: MongoDbSettings = Field(default_factory=MongoDbSettings)
-    logging.info(f"mongodb {mongodb}")
+
+    # added validation_alias="mongo" so 'MONGO_HOST' env
+    # var maps to this 'mongodb' field
+    mongodb: MongoDbSettings = Field(
+        default_factory=MongoDbSettings, validation_alias="mongo"
+    )
+
     cassandra: CassandraSettings = Field(default_factory=CassandraSettings)
     spark: SparkSettings = Field(default_factory=SparkSettings)
 
@@ -103,6 +113,11 @@ class AppSettings(BaseSettings):
 
     # Application-specific Settings
     polyfuseql_schema_path: Path = Path("schemas.json")
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        # Logging moved to __init__ so it runs after data is loaded
+        logging.info(f"Loaded MongoDB Settings: {self.mongodb}")
 
 
 # Singleton instance to be used across the application

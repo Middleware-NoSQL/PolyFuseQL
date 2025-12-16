@@ -251,4 +251,21 @@ services:
         condition: service_healthy
     networks:
       - polyfuse-net
+  polyfuseql:
+    container_name: polyfuseql_app
+    build:
+      context: .
+      dockerfile: docker/polyfuseql/Dockerfile
+    profiles: ["app"]
+    ports:
+      - "8000:8000"
+    # Load environment variables from .env
+    env_file:
+      - .env
+    # Allow communication with the local host machine if necessary
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Wait for databases to be healthy before starting
+    networks:
+      - polyfuse-net
 

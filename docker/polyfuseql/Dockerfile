@@ -70,7 +70,7 @@ EXPOSE 8000
 
 # Run the application using Uvicorn
 # The path matches src/polyfuseql/app/main.py
-CMD ["uvicorn", "polyfuseql.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "polyfuseql.app.main:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "debug"]
 
 # You must run these commands from the **project root directory** (`PolyFuseQL/`) so Docker can access `pyproject.toml`
 # and the `src/` folder.

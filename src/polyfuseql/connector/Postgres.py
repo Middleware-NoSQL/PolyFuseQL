@@ -35,6 +35,11 @@ class PostgresConnector(Connector):
 
     async def connect(self) -> None:
         if not self._connection or self._connection.is_closed():
+            logger = logging.getLogger("uvicorn.error")
+            logger.debug(
+                f"host: {self._host}, port: {self._port}, user: {self._user}, "
+                f"password: {self._password}"
+            )
             self._connection = await asyncpg.connect(
                 host=self._host,
                 port=self._port,
