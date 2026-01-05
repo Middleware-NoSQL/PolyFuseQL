@@ -8,25 +8,58 @@ import pytest
 import pytest_asyncio
 from polyfuseql.client import PolyClient
 
+# from tests.test_tpch_query1 import TPCH_QUERY_1
+
 # TPC-H Query 1 - Pricing Summary Report
+# TPCH_QUERY_1 = """
+# SELECT l_returnflag, \
+#       l_linestatus, \
+#       SUM(l_quantity)                                       AS sum_qty, \
+#       SUM(l_extendedprice)                                  AS sum_base_price,\
+#       SUM(l_extendedprice * (1 - l_discount))               AS sum_disc_price,\
+#       SUM(l_extendedprice * (1 - l_discount) * (1 + l_tax)) AS sum_charge, \
+#       AVG(l_quantity)                                       AS avg_qty, \
+#       AVG(l_extendedprice)                                  AS avg_price, \
+#       AVG(l_discount)                                       AS avg_disc, \
+#       COUNT(*)                                              AS count_order
+# FROM lineitem
+# WHERE l_shipdate <= date '1998-09-02'
+# GROUP BY l_returnflag, \
+#         l_linestatus
+# ORDER BY l_returnflag, \
+#         l_linestatus; \
+#                """
+
 TPCH_QUERY_1 = """
-SELECT l_returnflag, \
-      l_linestatus, \
-      SUM(l_quantity)                                       AS sum_qty, \
-      SUM(l_extendedprice)                                  AS sum_base_price,\
-      SUM(l_extendedprice * (1 - l_discount))               AS sum_disc_price,\
-      SUM(l_extendedprice * (1 - l_discount) * (1 + l_tax)) AS sum_charge, \
-      AVG(l_quantity)                                       AS avg_qty, \
-      AVG(l_extendedprice)                                  AS avg_price, \
-      AVG(l_discount)                                       AS avg_disc, \
-      COUNT(*)                                              AS count_order
-FROM lineitem
-WHERE l_shipdate <= date '1998-09-02'
-GROUP BY l_returnflag, \
-        l_linestatus
-ORDER BY l_returnflag, \
-        l_linestatus; \
+               select o_year,
+                      sum(case when nation = 'BRAZIL'
+                                   then volume else 0 end) / sum(volume)
+                          as mkt_share
+               from (select extract(year from o_orderdate)     as o_year,
+                            l_extendedprice * (1 - l_discount) as volume,
+                            n2.n_name                          as nation
+                     from part,
+                          supplier,
+                          lineitem,
+                          orders,
+                          customer,
+                          nation n1,
+                          nation n2,
+                          region
+                     where p_partkey = l_partkey
+                       and s_suppkey = l_suppkey
+                       and l_orderkey = o_orderkey
+                       and o_custkey = c_custkey
+                       and c_nationkey = n1.n_nationkey
+                       and n1.n_regionkey = r_regionkey
+                       and r_name = 'AMERICA'
+                       and s_nationkey = n2.n_nationkey
+                       and o_orderdate between date '1995-01-01' and date '1996-12-31'
+                       and p_type = 'ECONOMY ANODIZED STEEL') as all_nations
+               group by o_year
+               order by o_year;
                """
+
 
 GROUND_TRUTH_FILE = Path(__file__).parent / "ground_truth_q1.json"
 
@@ -75,6 +108,7 @@ async def test_tpch_query1_fast(engine, poly_client, ground_truth_from_file):
     logging.info(f"Executing query on {engine}...")
     results = await poly_client.execute(TPCH_QUERY_1, engine=engine)
     print(f"Query executed on {engine}.")
+    logging.info(f"Queried results: {results}")
 
     # Step 2: Round and sort the actual results from Neo4j.
     rounded_res = round_results(results)

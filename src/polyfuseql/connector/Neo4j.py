@@ -20,13 +20,16 @@ from polyfuseql.connector.SparkTranslator import SparkTranslator
 from polyfuseql.utils.spark_manager import get_spark_session
 from polyfuseql.utils.utils import _camelize_keys, get_pydantic_model
 
+logger = logging.getLogger("uvicorn.error")
 try:
-    from pyspark.sql import functions as F, DataFrame
+    from pyspark.sql import functions as F, DataFrame, SparkSession
     from pyspark.sql.types import (
         DateType,
         DecimalType,
         DoubleType,
         StringType,
+        IntegerType,
+        LongType,
         StructField,
         StructType,
     )
@@ -193,6 +196,8 @@ class Neo4jConnector(Connector, SparkTranslator):
         # has better support for Spark's DoubleType.
         read_schema_fields = []
         return_expressions = []
+        date_cols = []  # Track columns that need casting to DateType
+
         for field in spark_schema.fields:
             if isinstance(field.dataType, (DecimalType, DoubleType)):
                 read_schema_fields.append(
@@ -201,9 +206,22 @@ class Neo4jConnector(Connector, SparkTranslator):
                 return_expressions.append(
                     f"toFloat(n.{field.name}) AS {field.name}"
                 )  # noqa:E501
+            elif isinstance(field.dataType, (IntegerType, LongType)):
+                # Keep LongType for IDs/integers to avoid overflow/casting issues
+                read_schema_fields.append(field)
+                return_expressions.append(f"toInteger(n.{field.name}) AS {field.name}")
+            elif isinstance(field.dataType, DateType):
+                # [FIX] Read Dates as Strings first to avoid
+                # 'UTF8String cannot be cast to Integer'
+                # Spark DateType is internally an int; if we pass a String raw
+                # it crashes.
+                read_schema_fields.append(StructField(field.name, StringType(), True))
+                return_expressions.append(f"toString(n.{field.name}) AS {field.name}")
+                date_cols.append(field.name)
             else:
                 read_schema_fields.append(field)
                 return_expressions.append(f"n.{field.name} AS {field.name}")
+
         read_schema = StructType(read_schema_fields)
         label_str = f"MATCH (n:{label})"
         return_str = f"RETURN {', '.join(return_expressions)}"
@@ -211,28 +229,33 @@ class Neo4jConnector(Connector, SparkTranslator):
 
         # 2. Define the synchronous Spark-loading function
         def _load_sync() -> "DataFrame":
-            try:
-                df = (
-                    spark_session.read.format("org.neo4j.spark.DataSource")
-                    .option("url", self._uri)
-                    .option("authentication.type", "basic")
-                    .option("authentication.basic.username", self._auth[0])
-                    .option("authentication.basic.password", self._auth[1])
-                    .option("query", cypher_query)
-                    .schema(read_schema)
-                    .load()
-                )
+            # try:
+            df = (
+                spark_session.read.format("org.neo4j.spark.DataSource")
+                .option("url", self._uri)
+                .option("authentication.type", "basic")
+                .option("authentication.basic.username", self._auth[0])
+                .option("authentication.basic.password", self._auth[1])
+                .option("query", cypher_query)
+                .schema(read_schema)
+                .load()
+            )
 
-                # 3. Cast columns back to their proper high-precision types
-                for field in spark_schema.fields:
-                    if isinstance(field.dataType, DecimalType):
-                        df = df.withColumn(
-                            field.name, F.col(field.name).cast(field.dataType)
-                        )
-                return df
-            except Exception as e:
-                logging.error(f"Failed to load data using spark-neo4j: {e}")
-                return spark_session.createDataFrame([], spark_schema)
+            # 3. Cast columns back to their proper types
+            for field in spark_schema.fields:
+                if isinstance(field.dataType, DecimalType):
+                    df = df.withColumn(
+                        field.name, F.col(field.name).cast(field.dataType)
+                    )
+
+            # [FIX] Explicitly cast String dates to Spark DateType
+            for col_name in date_cols:
+                df = df.withColumn(col_name, F.col(col_name).cast(DateType()))
+
+            return df
+            # except Exception as e:
+            #    logging.error(f"Failed to load data using spark-neo4j: {e}")
+            #    return spark_session.createDataFrame([], spark_schema)
 
         # 4. Bridge from async to sync Spark execution
         logging.info(
@@ -241,75 +264,53 @@ class Neo4jConnector(Connector, SparkTranslator):
         df = await asyncio.to_thread(_load_sync)
         return df
 
+    async def _ensure_tables_loaded(
+        self, ast: exp.Expression, spark: SparkSession
+    ) -> None:
+        """
+        Identifies all physical tables recursively in the AST and loads them
+        into Spark Temp Views. Skips aliases and derived tables (e.g. subqueries)
+        that are not defined in the catalogue.
+        """
+        # find_all(exp.Table) traverses the AST recursively
+        for table in ast.find_all(exp.Table):
+            table_name = table.name
+
+            # [CRITICAL FIX] Handle case sensitivity for schema lookup.
+            # SQLGlot might treat names as uppercase (e.g. PART), but catalogue keys
+            # are usually lowercase (e.g. part).
+            if not self.catalogue.get_schema(table_name):
+                if self.catalogue.get_schema(table_name.lower()):
+                    table_name = table_name.lower()
+                else:
+                    logging.debug(f"Skipping '{table_name}': Not found in catalogue.")
+                    continue
+
+            # Skip if already registered to avoid redundant IO
+            if spark.catalog.tableExists(table_name):
+                continue
+
+            # Load and register the physical table
+            df = await self._load_table_to_spark_df(table_name, spark)
+            df.createOrReplaceTempView(table_name)
+
     async def join(self, ast: exp.Select) -> List[Dict[str, Any]]:
         """
-        [New Implementation] Executes a JOIN query using Spark.
-        Delegates data loading to _load_table_to_spark_df.
+        [New Implementation] Executes a JOIN query using Spark SQL.
+        Handles complex joins and subqueries by delegating execution to Spark engine.
         """
         spark = get_spark_session()
         if not spark:
             raise RuntimeError("PySpark is not available for JOINs.")
 
-        # 1. Fetch the FROM table
-        from_table_expr = ast.args.get("from").this
-        from_table_name = from_table_expr.this.name
-        from_table_alias = from_table_expr.alias_or_name
+        # 1. Load all physical tables referenced in the query
+        await self._ensure_tables_loaded(ast, spark)
 
-        joined_df = (
-            await self._load_table_to_spark_df(from_table_name, spark)
-        ).alias(  # noqa:E501
-            from_table_alias
-        )
+        # 2. Execute the AST directly as Spark SQL
+        # This supports subqueries, CTEs, and complex conditions natively
+        df = spark.sql(ast.sql())
 
-        # 2. Loop through JOINs
-        joins = ast.args.get("joins", [])
-        for join_expr in joins:
-            join_table_expr = join_expr.this
-            join_table_name = join_table_expr.this.name
-            join_table_alias = join_table_expr.alias_or_name
-
-            df_to_join = (
-                await self._load_table_to_spark_df(join_table_name, spark)
-            ).alias(join_table_alias)
-
-            join_condition = self._translate_expression_to_spark(
-                join_expr.args.get("on")
-            )
-            join_type = join_expr.args.get("kind", "INNER").lower()
-
-            joined_df = joined_df.join(
-                df_to_join, on=join_condition, how=join_type
-            )  # noqa:E501
-
-        # 3. Apply WHERE
-        if ast.args.get("where"):
-            filter_cond = self._translate_expression_to_spark(
-                ast.args["where"].this
-            )  # noqa:E501
-            joined_df = joined_df.filter(filter_cond)
-
-        # 4. Apply SELECT
-        select_expressions = [
-            self._translate_expression_to_spark(e) for e in ast.expressions
-        ]
-        final_df = joined_df.select(*select_expressions)
-
-        # 5. Apply ORDER BY
-        if ast.args.get("order"):
-            order_exprs = []
-            for e in ast.args["order"].expressions:
-                col = self._translate_expression_to_spark(e.this)
-                direction = e.args.get("desc", False)
-                order_exprs.append(col.desc() if direction else col.asc())
-            final_df = final_df.orderBy(*order_exprs)
-
-        # 6. Apply LIMIT
-        if ast.args.get("limit"):
-            limit_val = int(ast.args["limit"].this.this)
-            final_df = final_df.limit(limit_val)
-
-        # 7. Collect and return
-        results = [row.asDict() for row in final_df.collect()]
+        results = [row.asDict() for row in df.collect()]
         return [_camelize_keys(row) for row in results]
 
     # --- ADDED 'query' METHOD ---
@@ -327,8 +328,7 @@ class Neo4jConnector(Connector, SparkTranslator):
     # --- ADDED 'group_by' METHOD ---
     async def group_by(self, ast: exp.Select) -> List[Dict[str, Any]]:
         """
-        [Sonar Refactor] Executes a GROUP BY query using Spark.
-        This method now delegates data loading to _load_table_to_spark_df.
+        [Sonar Refactor] Executes a GROUP BY query using Spark SQL.
         """
         spark = get_spark_session()
         if not spark:
@@ -336,57 +336,20 @@ class Neo4jConnector(Connector, SparkTranslator):
             msg += "but is not available."
             raise RuntimeError(msg)
 
-        # 1. Load the data using the refactored helper
-        table_name = ast.find(exp.Table).name
-        df = await self._load_table_to_spark_df(table_name, spark)
+        # 1. Load all physical tables involved (recursive search)
+        await self._ensure_tables_loaded(ast, spark)
 
-        if df.isEmpty():
-            return []
+        # 2. Run the query via Spark SQL
+        # This bypasses manual DataFrame chaining, fixing subquery alias issues
+        df = spark.sql(ast.sql())
 
-        # 2. Apply WHERE
-        if ast.args.get("where"):
-            # Use the robust Spark filter, not Cypher string manipulation
-            filter_cond = self._translate_expression_to_spark(
-                ast.args["where"].this
-            )  # noqa:E501
-            df = df.filter(filter_cond)
-
-        # 3. Apply GROUP BY
-        group_by_cols = [
-            self._translate_expression_to_spark(e)
-            for e in ast.args.get("group").expressions
-        ]
-        grouped_df = df.groupBy(*group_by_cols)
-
-        # 4. Apply Aggregations
-        agg_expressions = []
-        final_cols = []
-        for expr in ast.expressions:
-            spark_expr = self._translate_expression_to_spark(expr)
-            agg_expressions.append(spark_expr)
-            final_cols.append(expr.alias_or_name)
-
-        agg_df = grouped_df.agg(*agg_expressions)
-
-        # 5. Apply ORDER BY
-        if ast.args.get("order"):
-            order_cols = []
-            for e in ast.args["order"].expressions:
-                col = self._translate_expression_to_spark(e.this)
-                direction = e.args.get("desc", False)
-                order_cols.append(col.desc() if direction else col.asc())
-            agg_df = agg_df.orderBy(*order_cols)
-
-        # 6. Apply SELECT (final projection)
-        final_df = agg_df.select(*final_cols)
-        results = [row.asDict() for row in final_df.collect()]
+        results = [row.asDict() for row in df.collect()]
         return [_camelize_keys(row) for row in results]
 
     # --- ADDED 'aggregate' METHOD ---
     async def aggregate(self, ast: exp.Select) -> List[Dict[str, Any]]:
         """
-        [Sonar Refactor] Executes an aggregate query using Spark.
-        This method now delegates data loading to _load_table_to_spark_df.
+        [Sonar Refactor] Executes an aggregate query using Spark SQL.
         """
         spark = get_spark_session()
         if not spark:
@@ -394,38 +357,13 @@ class Neo4jConnector(Connector, SparkTranslator):
             msg += "but is not available."
             raise RuntimeError(msg)
 
-        # 1. Load the data
-        table_name = ast.find(exp.Table).name
-        df = await self._load_table_to_spark_df(table_name, spark)
+        # 1. Load tables
+        await self._ensure_tables_loaded(ast, spark)
 
-        if df.isEmpty():
-            # Return a default empty/zero state if no data
-            result = {}
-            for expr in ast.expressions:
-                alias = expr.alias_or_name
-                result[alias] = (
-                    Decimal("0.0")
-                    if isinstance(expr.this, (exp.Sum, exp.Avg))
-                    else 0  # noqa:E501
-                )
-            return [_camelize_keys(result)]
+        # 2. Run logic via Spark SQL
+        df = spark.sql(ast.sql())
 
-        # 2. Apply WHERE
-        if ast.args.get("where"):
-            filter_cond = self._translate_expression_to_spark(
-                ast.args["where"].this
-            )  # noqa:E501
-            df = df.filter(filter_cond)
-
-        # 3. Apply Aggregations
-        agg_expressions = []
-        for expr in ast.expressions:
-            spark_expr = self._translate_expression_to_spark(expr)
-            agg_expressions.append(spark_expr)
-
-        result_df = df.agg(*agg_expressions)
-        results = [row.asDict() for row in result_df.collect()]
-
+        results = [row.asDict() for row in df.collect()]
         return [_camelize_keys(row) for row in results]
 
     def _process_row_for_neo4j(
@@ -545,9 +483,15 @@ class Neo4jConnector(Connector, SparkTranslator):
     def _get_spark_schema(self, table_name: str) -> "StructType":
         sch_def = self.catalogue.get_schema(table_name)
         if not sch_def:
+            # Try lowercase fallback
+            sch_def = self.catalogue.get_schema(table_name.lower())
+
+        if not sch_def:
             msg = "No schema definition found for table: "
             msg += f"{table_name}"
+            logger.debug(msg)
             raise ValueError(msg)
+
         fields = []
         for c_name, c_type_str in sch_def["columns"].items():
             if c_type_str == "date":
@@ -556,6 +500,14 @@ class Neo4jConnector(Connector, SparkTranslator):
                 fields.append(
                     StructField(c_name, DecimalType(38, 10), True)
                 )  # noqa:F501
+            elif c_type_str == "int":
+                # [FIX] Map 'int' to LongType because Neo4j integers are 64-bit (Long)
+                # and Spark's IntegerType is 32-bit, causing ClassCastException.
+                fields.append(StructField(c_name, LongType(), True))
+            elif c_type_str == "long":
+                fields.append(StructField(c_name, LongType(), True))
+            elif c_type_str == "float" or c_type_str == "double":
+                fields.append(StructField(c_name, DoubleType(), True))
             else:
                 fields.append(StructField(c_name, StringType(), True))
         return StructType(fields)

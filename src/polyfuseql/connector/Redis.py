@@ -1,9 +1,10 @@
+# ruff: noqa E501
+
 import csv
 import json
 import logging
 import asyncio  # Import asyncio for thread bridging
 import aiofiles  # Import aiofiles
-from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, AsyncGenerator
 
 import redis.asyncio as aioredis
@@ -18,7 +19,7 @@ from polyfuseql.utils.spark_manager import get_spark_session
 from polyfuseql.utils.utils import get_pydantic_model, _camelize_keys
 
 try:
-    from pyspark.sql import functions as F, DataFrame
+    from pyspark.sql import functions as F, DataFrame, SparkSession
     from pyspark.sql.types import (
         StructType,
         StructField,
@@ -26,6 +27,8 @@ try:
         DecimalType,
         DateType,
         IntegerType,
+        LongType,
+        DoubleType,
     )
 
     SPARK_AVAILABLE = True
@@ -260,13 +263,20 @@ class RedisConnector(Connector, SparkTranslator):
     def _get_spark_schema(self, table_name: str) -> Optional["StructType"]:
         schema_def = self.catalogue.get_schema(table_name)
         if not schema_def:
+            # Try lowercase fallback
+            schema_def = self.catalogue.get_schema(table_name.lower())
+
+        if not schema_def:
             return None
 
         type_mapping = {
             "int": IntegerType(),
+            "long": LongType(),
             "str": StringType(),
             "date": DateType(),
             "decimal": DecimalType(18, 4),
+            "float": DoubleType(),
+            "double": DoubleType(),
         }
         fields = [
             StructField(
@@ -336,16 +346,63 @@ class RedisConnector(Connector, SparkTranslator):
         # Call via class name or local reference, NOT self
         return RedisConnector._process_redis_results(results, data_type)
 
+    async def _resolve_key_pattern(self, table_name: str, data_type: str) -> str:
+        """
+        Determines the correct Redis key pattern by checking if keys exist
+        for Capitalized or lowercase table names.
+        """
+        r = self._get_client()
+
+        # 1. Try Capitalized (Default)
+        cap_pattern = f"{table_name.capitalize()}:*"
+        if self._options.get("include_data_type_in_pk", False):
+            cap_pattern += f":{data_type}"
+
+        async for _ in r.scan_iter(match=cap_pattern, count=1):
+            return cap_pattern
+
+        # 2. Try Lowercase
+        lower_pattern = f"{table_name.lower()}:*"
+        if self._options.get("include_data_type_in_pk", False):
+            lower_pattern += f":{data_type}"
+
+        async for _ in r.scan_iter(match=lower_pattern, count=1):
+            msg = f"Detected lowercase keys for table '{table_name}'. "
+            msg += f"Using pattern: '{lower_pattern}'"
+            logging.info(msg)
+            return lower_pattern
+
+        # 3. Last resort debug: Log what IS in the database
+        logging.warning(
+            f"Table '{table_name}' not found with Capitalized or Lowercase patterns."
+        )
+
+        # Scan for ANY keys to give a hint about what's actually there
+        prefixes = set()
+        async for k in r.scan_iter(count=1000):
+            if ":" in k:
+                prefixes.add(k.split(":")[0])
+            if len(prefixes) >= 10:
+                break
+
+        if prefixes:
+            logging.info(f"DEBUG: Available table prefixes in Redis: {list(prefixes)}")
+        else:
+            logging.warning("DEBUG: Redis appears to be EMPTY.")
+
+        return cap_pattern
+
     async def _load_table_hash_spark(
         self, table_name: str, spark_session, target_schema, data_type
     ) -> "DataFrame":
         """Loads a 'hash' table using the scalable spark-redis connector."""
         logging.info(
-            f"Using scalable `spark-redis` connector for 'hash' table: {table_name}"  # noqa: E501
+            f"Using scalable `spark-redis` connector for 'hash' table: {table_name}"
+            # noqa: E501
         )
-        key_pattern = f"{table_name.capitalize()}:*"
-        if self._options.get("include_data_type_in_pk", False):
-            key_pattern += f":{data_type}"
+
+        # [FIX] Resolve pattern dynamically based on existing data
+        key_pattern = await self._resolve_key_pattern(table_name, data_type)
 
         redis_config = {
             "host": self._host,
@@ -388,11 +445,13 @@ class RedisConnector(Connector, SparkTranslator):
         }
         num_slices = spark_session.sparkContext.defaultParallelism * 4
 
-        key_pattern = f"{table_name.capitalize()}:*"
-        if self._options.get("include_data_type_in_pk", False):
-            key_pattern += f":{data_type}"
+        # [FIX] Resolve pattern dynamically based on existing data
+        key_pattern = await self._resolve_key_pattern(table_name, data_type)
 
+        logging.info(f"Scanning Redis with pattern: '{key_pattern}'")
         keys = [key async for key in r.scan_iter(key_pattern)]
+        logging.info(f"Found {len(keys)} keys.")
+
         if not keys:
             return spark_session.createDataFrame([], target_schema)
 
@@ -436,225 +495,113 @@ class RedisConnector(Connector, SparkTranslator):
                 table_name, spark_session, target_schema, data_type
             )
 
-    # --- [SONARQUBE S3776 FIX] ---
-    # Refactored join/group_by to use helper functions.
+    async def _ensure_tables_loaded(
+        self, ast: exp.Expression, spark: SparkSession
+    ) -> None:
+        """
+        Identifies all physical tables recursively in the AST and loads them
+        into Spark Temp Views. Skips aliases and derived tables (e.g. subqueries)
+        that are not defined in the catalogue.
+        """
+        # find_all(exp.Table) traverses the AST recursively
+        for table in ast.find_all(exp.Table):
+            table_name = table.name
 
-    async def _apply_spark_joins(
-        self, joined_df: "DataFrame", joins: List[exp.Join], spark_session
-    ) -> "DataFrame":
-        """Applies all JOIN clauses to a Spark DataFrame."""
-        for join_expr in joins:
-            join_table_expr = join_expr.this
-            join_table_name = join_table_expr.this.name
-            join_table_alias = join_table_expr.alias_or_name
+            # CRITICAL FIX: Ignore aliases/subqueries (like 'all_nations')
+            # by verifying they exist in the catalogue.
+            # Handle case sensitivity for schema lookup.
+            schema_entry = self.catalogue.get_schema(table_name)
+            if not schema_entry:
+                if self.catalogue.get_schema(table_name.lower()):
+                    table_name = table_name.lower()
+                    schema_entry = self.catalogue.get_schema(table_name)
+                else:
+                    logging.info(f"Skipping '{table_name}': Not found in catalogue.")
+                    continue
 
-            df_to_join = (
-                await self._load_table_to_spark_df(join_table_name, spark_session)
-            ).alias(join_table_alias)
+            # [SCHEMA CHECK] Warn if we are trying to load a non-Redis table from Redis
+            backend = schema_entry.get("backend", "unknown")
+            if backend != "redis":
+                msg = f"Table '{table_name}' is configured for backend '{backend}' in "
+                msg += "schemas.json but is being accessed via RedisConnector. "
+                msg += "Spark will likely load 0 rows unless data was manually "
+                msg += "replicated to Redis."
+                logging.warning(msg)
 
-            join_condition = self._translate_expression_to_spark(
-                join_expr.args.get("on")
+            # Skip if already registered to avoid redundant IO
+            if spark.catalog.tableExists(table_name):
+                logging.info(f"Table '{table_name}' already exists in Spark session.")
+                continue
+
+            # Load and register the physical table
+            df = await self._load_table_to_spark_df(table_name, spark)
+
+            # [DEBUG] Count rows to ensure data is loaded
+            count = df.count()
+            logging.info(
+                f"Loaded table '{table_name}' into Spark Temp View with {count} rows."
             )
-            join_type = join_expr.args.get("kind", "INNER").lower()
 
-            joined_df = joined_df.join(df_to_join, on=join_condition, how=join_type)
-        return joined_df
-
-    def _apply_spark_where(
-        self, df: "DataFrame", where: Optional[exp.Where]
-    ) -> "DataFrame":
-        """Applies a WHERE clause to a Spark DataFrame."""
-        if where:
-            filter_cond = self._translate_expression_to_spark(where.this)
-            return df.filter(filter_cond)
-        return df
-
-    def _apply_spark_order_by(
-        self, df: "DataFrame", order: Optional[exp.Order]
-    ) -> "DataFrame":
-        """Applies an ORDER BY clause to a Spark DataFrame."""
-        if order:
-            order_exprs = []
-            for e in order.expressions:
-                col = self._translate_expression_to_spark(e.this)
-                direction = e.args.get("desc", False)
-                order_exprs.append(col.desc() if direction else col.asc())
-            return df.orderBy(*order_exprs)
-        return df
-
-    def _apply_spark_limit(
-        self, df: "DataFrame", limit: Optional[exp.Limit]
-    ) -> "DataFrame":
-        """Applies a LIMIT clause to a Spark DataFrame."""
-        if limit:
-            limit_val = int(limit.this.this)
-            return df.limit(limit_val)
-        return df
+            df.createOrReplaceTempView(table_name)
 
     async def join(self, ast: exp.Select) -> List[Dict[str, Any]]:
         """
-        [Sonar Refactor] Executes a JOIN query using Spark.
-        Delegates logic to helper methods.
+        [New Implementation] Executes a JOIN query using Spark SQL.
+        Handles complex joins and subqueries by delegating execution to Spark engine.
         """
         spark = get_spark_session("Redis")
         if not spark:
             raise RuntimeError("PySpark is not available for JOINs.")
 
-        # 1. Fetch the FROM table
-        from_table_expr = ast.args.get("from").this
-        from_table_name = from_table_expr.this.name
-        from_table_alias = from_table_expr.alias_or_name
+        # 1. Load all physical tables referenced in the query
+        await self._ensure_tables_loaded(ast, spark)
 
-        df = (await self._load_table_to_spark_df(from_table_name, spark)).alias(
-            from_table_alias
-        )
+        # 2. Execute the AST directly as Spark SQL
+        generated_sql = ast.sql()
+        logging.info(f"Executing Spark SQL for JOIN: {generated_sql}")
+        df = spark.sql(generated_sql)
 
-        # 2. Apply Joins, Where, Order, Limit
-        df = await self._apply_spark_joins(df, ast.args.get("joins", []), spark)
-        df = self._apply_spark_where(df, ast.args.get("where"))
-        df = self._apply_spark_order_by(df, ast.args.get("order"))
-        df = self._apply_spark_limit(df, ast.args.get("limit"))
-
-        # 3. Apply final SELECT
-        select_expressions = [
-            self._translate_expression_to_spark(e) for e in ast.expressions
-        ]
-        final_df = df.select(*select_expressions)
-
-        # 4. Collect and return
-        results = [row.asDict() for row in final_df.collect()]
+        results = [row.asDict() for row in df.collect()]
         return [_camelize_keys(row) for row in results]
-
-    def _apply_spark_group_by_aggs(
-        self, df: "DataFrame", ast: exp.Select
-    ) -> "DataFrame":
-        """
-        [Sonar Refactor S3776]
-        Applies GROUP BY and Aggregation logic.
-        Uses list comprehension to reduce complexity.
-        """
-        group_by_cols = [
-            self._translate_expression_to_spark(e)
-            for e in ast.args.get("group").expressions
-        ]
-        grouped_df = df.groupBy(*group_by_cols)
-
-        # [SONAR REFACTOR S3776] Replaced loop with list comprehension
-        agg_expressions = [
-            self._translate_expression_to_spark(expr) for expr in ast.expressions
-        ]
-
-        return grouped_df.agg(*agg_expressions)
 
     async def group_by(self, ast: exp.Select) -> List[Dict[str, Any]]:
         """
-        [Sonar Refactor] Executes a GROUP BY query using Spark.
-        Delegates logic to helper methods.
+        [Sonar Refactor] Executes a GROUP BY query using Spark SQL.
         """
         spark = get_spark_session("Redis")
         if not spark:
             msg = "PySpark is required for GROUP BY operations"
             raise RuntimeError(msg)
 
-        # 1. Load data
-        table_name = ast.find(exp.Table).name
-        df = await self._load_table_to_spark_df(table_name, spark)
-        if df.isEmpty():
-            return []
+        # 1. Load all physical tables referenced in the query
+        await self._ensure_tables_loaded(ast, spark)
 
-        # 2. Apply Where, GroupBy/Agg, Order
-        df = self._apply_spark_where(df, ast.args.get("where"))
-        df = self._apply_spark_group_by_aggs(df, ast)
-        df = self._apply_spark_order_by(df, ast.args.get("order"))
+        # 2. Execute the AST directly as Spark SQL
+        generated_sql = ast.sql()
+        logging.info(f"Executing Spark SQL for GROUP BY: {generated_sql}")
+        df = spark.sql(generated_sql)
 
-        # 3. Apply final SELECT
-        final_cols = [e.alias_or_name for e in ast.expressions]
-        final_df = df.select(*final_cols)
-
-        results = [row.asDict() for row in final_df.collect()]
+        results = [row.asDict() for row in df.collect()]
         return [_camelize_keys(row) for row in results]
-
-    # --- [SONARQUBE S3776 FIX FOR aggregate] ---
-
-    def _handle_empty_aggregate_result(self, ast: exp.Select) -> List[Dict[str, Any]]:
-        """
-        [Sonar Refactor] Helper for aggregate:
-        Returns a default empty/zero state when no data is found.
-        """
-        logging.info("No data to aggregate")
-        result = {}
-        for expr in ast.expressions:
-            alias = expr.alias_or_name
-            # Set default value for aggregate functions
-            is_agg = isinstance(expr.this, (exp.Sum, exp.Avg))
-            result[alias] = Decimal("0.0") if is_agg else 0
-        return [_camelize_keys(result)]
-
-    def _handle_agg_count(
-        self, agg_func: exp.Count, all_data: List[Dict[str, Any]]
-    ) -> int:
-        """
-        [Sonar Refactor] Helper for aggregate:
-        Calculates COUNT(*) or COUNT(column).
-        """
-        if agg_func.this.is_star:
-            return len(all_data)
-
-        # Handle COUNT(column)
-        col_name = agg_func.this.name
-        values = [
-            row.get(col_name) for row in all_data if row.get(col_name) is not None
-        ]
-        return len(values)
-
-    def _handle_agg_sum_avg(
-        self, agg_func: exp.AggFunc, all_data: List[Dict[str, Any]]
-    ) -> Decimal:
-        """
-        [Sonar Refactor] Helper for aggregate:
-        Calculates SUM(expr) or AVG(expr).
-        """
-        # Evaluate the expression for all rows
-        values = [self._evaluate_expression(agg_func.this, row) for row in all_data]
-        # Filter out None values which might result from failed lookups
-        values = [v for v in values if v is not None]
-
-        if isinstance(agg_func, exp.Sum):
-            return sum(values)
-        if isinstance(agg_func, exp.Avg):
-            return sum(values) / len(values) if values else Decimal("0.0")
-
-        return Decimal("0.0")  # Should not be reached
 
     async def aggregate(self, ast: exp.Select) -> List[Dict[str, Any]]:
         """
-        [Sonar Refactor] Executes an aggregate query without GROUP BY.
-        Delegates logic to helper methods to reduce complexity.
+        [Sonar Refactor] Executes an aggregate query using Spark SQL.
         """
-        logging.info("Aggregating on Redis")
-        table_name = ast.find(exp.Table).name
-        all_data = await self.get_all(table_name)
+        spark = get_spark_session("Redis")
+        if not spark:
+            raise RuntimeError("PySpark is not available for AGGREGATE.")
 
-        if not all_data:
-            return self._handle_empty_aggregate_result(ast)
+        # 1. Load all physical tables referenced in the query
+        await self._ensure_tables_loaded(ast, spark)
 
-        result_row = {}
-        for expr in ast.expressions:
-            # Ensure we are dealing with an aliased aggregate function
-            if not (isinstance(expr, exp.Alias) and isinstance(expr.this, exp.AggFunc)):
-                continue
+        # 2. Execute the AST directly as Spark SQL
+        generated_sql = ast.sql()
+        logging.info(f"Executing Spark SQL for AGGREGATE: {generated_sql}")
+        df = spark.sql(generated_sql)
 
-            agg_func, alias = expr.this, expr.alias_or_name
-
-            if isinstance(agg_func, exp.Count):
-                result_row[alias] = self._handle_agg_count(agg_func, all_data)
-
-            elif isinstance(agg_func, (exp.Sum, exp.Avg)):
-                result_row[alias] = self._handle_agg_sum_avg(agg_func, all_data)
-
-            # Note: MIN/MAX not implemented in original, so not added here.
-
-        return [_camelize_keys(result_row)]
+        results = [row.asDict() for row in df.collect()]
+        return [_camelize_keys(row) for row in results]
 
     # --- [SONARQUBE S3776 & S7493 FIX] ---
     # Refactored bulk_insert to reduce complexity and use async I/O.
@@ -751,61 +698,3 @@ class RedisConnector(Connector, SparkTranslator):
             await pipe.execute()
 
         return inserted_count
-
-    # --- [SONARQUBE S3776 FIX] ---
-    # Refactored _evaluate_expression to reduce complexity.
-
-    def _eval_column(self, expression: exp.Column, row_data) -> Decimal:
-        """Helper for _evaluate_expression: Handles Column nodes."""
-        val = row_data.get(expression.sql())
-        try:
-            return Decimal(val) if val is not None else Decimal("0.0")
-        except (InvalidOperation, TypeError):
-            return Decimal("0.0")
-
-    def _eval_literal(self, expression: exp.Literal, row_data) -> Decimal:
-        """Helper for _evaluate_expression: Handles Literal nodes."""
-        return Decimal(expression.this)
-
-    def _eval_paren(self, expression: exp.Paren, row_data) -> Decimal:
-        """Helper for _evaluate_expression: Handles Paren nodes."""
-        return self._evaluate_expression(expression.this, row_data)
-
-    def _eval_binary(self, expression: exp.Binary, row_data) -> Decimal:
-        """Helper for _evaluate_expression: Handles Binary nodes."""
-        left_val = self._evaluate_expression(expression.left, row_data)
-        right_val = self._evaluate_expression(expression.right, row_data)
-
-        op_map = {
-            exp.Mul: lambda a, b: a * b,
-            exp.Sub: lambda a, b: a - b,
-            exp.Add: lambda a, b: a + b,
-        }
-        op_func = op_map.get(type(expression))
-        if op_func:
-            return op_func(left_val, right_val)
-
-        raise NotImplementedError(f"Unsupported binary expression: {type(expression)}")
-
-    def _evaluate_expression(self, expression, row_data):
-        """
-        [Sonar Refactor]
-        Evaluates a sqlglot Expression against a row of data.
-        Delegates to helper methods to reduce cognitive complexity.
-        """
-        if isinstance(expression, exp.Binary):
-            return self._eval_binary(expression, row_data)
-
-        evaluator_map = {
-            exp.Column: self._eval_column,
-            exp.Literal: self._eval_literal,
-            exp.Paren: self._eval_paren,
-        }
-        evaluator = evaluator_map.get(type(expression))
-
-        if evaluator:
-            return evaluator(expression, row_data)
-
-        raise NotImplementedError(
-            f"Unsupported expression: {type(expression)}"
-        )  # noqa: E501
