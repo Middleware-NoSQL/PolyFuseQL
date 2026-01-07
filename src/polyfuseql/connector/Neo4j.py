@@ -208,7 +208,7 @@ class Neo4jConnector(Connector, SparkTranslator):
                 )  # noqa:E501
             elif isinstance(field.dataType, (IntegerType, LongType)):
                 # Keep LongType for IDs/integers to avoid overflow/casting issues
-                read_schema_fields.append(field)
+                read_schema_fields.append(StructField(field.name, LongType(), True))
                 return_expressions.append(f"toInteger(n.{field.name}) AS {field.name}")
             elif isinstance(field.dataType, DateType):
                 # [FIX] Read Dates as Strings first to avoid 'UTF8String
@@ -402,64 +402,45 @@ class Neo4jConnector(Connector, SparkTranslator):
         dynamic_model: Any,
         batch_size: int,
     ) -> AsyncGenerator[List[Dict[str, Any]], None]:
-        """
-        [Sonar Refactor] Asynchronously reads a CSV file, validates rows,
-        and yields batches of processed data.
-        Fixes S3776 (Cognitive Complexity) and S7493 (Async file I/O).
-        """
         batch = []
         try:
             async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
-                # Read lines asynchronously and split for the csv reader
                 content = await f.read()
-                reader = csv.reader(content.splitlines(), delimiter="|")
-
+                lines = [line for line in content.splitlines() if line.strip()]
+                reader = csv.reader(lines, delimiter="|")
                 for line in reader:
-                    # Delegate row processing to the new helper function
+                    # Fix empty trailing column in TPC-H .tbl files
+                    if len(line) > len(cols):
+                        line = line[: len(cols)]
                     processed_row = self._process_row_for_neo4j(
                         line, cols, dynamic_model
                     )
-
                     if processed_row:
                         batch.append(processed_row)
-
                     if len(batch) >= batch_size:
                         yield batch
                         batch = []
-
                 if batch:
                     yield batch
-
         except FileNotFoundError:
             logging.error(f"File not found: {file_path}")
-            raise
-        except Exception as e:
-            logging.error(f"Error during CSV processing for {file_path}: {e}")
             raise
 
     async def bulk_insert(
         self, table_name: str, file_path: str, batch_size: int = 5000
     ) -> int:
-        """
-        [Sonar Refactor] Bulk inserts data from a file into the specified table
-        This function has been refactored to reduce cognitive complexity
-        by delegating row processing to `_process_csv_batch`.
-        """
         driver = self._get_driver()
         schema = self.catalogue.get_schema(table_name)
         if not schema:
-            msg = f"No schema definition found for table: {table_name}"
-            raise ValueError(msg)
+            raise ValueError(f"No schema for: {table_name}")
 
         cols = list(schema["columns"].keys())
         label = table_name.capitalize()
         dynamic_model = get_pydantic_model(table_name, schema)
 
-        # Clear the table first
         async with driver.session() as s:
             await s.run(f"MATCH (n:{label}) DETACH DELETE n")
 
-        # Prepare the Cypher query
         props_str = ", ".join([f"`{c}`: row.`{c}`" for c in cols])
         cypher_query = f"""
         UNWIND $rows AS row
@@ -467,7 +448,6 @@ class Neo4jConnector(Connector, SparkTranslator):
         """
 
         total_inserted = 0
-        # Use the async generator to process batches
         async for batch in self._process_csv_batch(
             file_path, cols, dynamic_model, batch_size
         ):
@@ -477,32 +457,25 @@ class Neo4jConnector(Connector, SparkTranslator):
                         _execute_batch_insert, cypher_query, batch
                     )
                     total_inserted += nodes_created
-
         return total_inserted
 
     def _get_spark_schema(self, table_name: str) -> "StructType":
         sch_def = self.catalogue.get_schema(table_name)
         if not sch_def:
-            # Try lowercase fallback
             sch_def = self.catalogue.get_schema(table_name.lower())
-
         if not sch_def:
-            msg = "No schema definition found for table: "
-            msg += f"{table_name}"
-            logger.debug(msg)
-            raise ValueError(msg)
+            raise ValueError(f"No schema definition for: {table_name}")
 
         fields = []
         for c_name, c_type_str in sch_def["columns"].items():
             if c_type_str == "date":
                 fields.append(StructField(c_name, DateType(), True))
             elif "decimal" in c_type_str:
-                fields.append(
-                    StructField(c_name, DecimalType(38, 10), True)
-                )  # noqa:F501
+                # [FIX] Map decimal to DoubleType to allow filter pushdown in Spark
+                # without ClientException in Neo4j Connector.
+                fields.append(StructField(c_name, DoubleType(), True))
             elif c_type_str == "int":
-                # [FIX] Map 'int' to LongType because Neo4j integers are 64-bit (Long)
-                # and Spark's IntegerType is 32-bit, causing ClassCastException.
+                # [FIX] Map int to LongType (64-bit)
                 fields.append(StructField(c_name, LongType(), True))
             elif c_type_str == "long":
                 fields.append(StructField(c_name, LongType(), True))

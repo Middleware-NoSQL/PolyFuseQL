@@ -19,7 +19,7 @@ from polyfuseql.utils.spark_manager import get_spark_session
 from polyfuseql.utils.utils import get_pydantic_model, _camelize_keys
 
 try:
-    from pyspark.sql import functions as F, DataFrame, SparkSession
+    from pyspark.sql import functions as F, DataFrame, SparkSession  # noqa:F401
     from pyspark.sql.types import (
         StructType,
         StructField,
@@ -49,12 +49,18 @@ class RedisConnector(Connector, SparkTranslator):
         self._port = settings.redis.port
         self._password = settings.redis.password
         self._client: Optional[aioredis.Redis] = None
+        # Default options if not provided
+        self._options = options or {}
 
     def set_data_type(self, data_type: dict) -> None:
+        """Updates options, useful for switching strategies at runtime."""
         self._options = data_type
 
     def get_data_type(self) -> str:
-        """Returns the current data type strategy for Redis operations."""
+        """
+        Returns the current data type strategy.
+        Priority: Runtime Options > Settings > Default 'hash'
+        """
         return self._options.get("data_type", settings.redis.data_type)
 
     async def connect(self) -> None:
@@ -100,6 +106,12 @@ class RedisConnector(Connector, SparkTranslator):
         key = f"{entity.capitalize()}:{pk_val}"
         logging.info("Getting data from Redis: %s", key)
         data_type = self.get_data_type()
+        # Append suffix if needed (legacy support)
+        if self._options.get("include_data_type_in_pk", False):
+            key += f":{data_type}"
+
+        logging.info(f"GET {key} (Type: {data_type})")
+
         logging.info("Data type: %s", data_type)
         raw_data = None
         if data_type == "string":
@@ -150,7 +162,9 @@ class RedisConnector(Connector, SparkTranslator):
         if not pk_val:
             raise ValueError("Primary key value not found in payload.")
 
-        key = f"{entity.capitalize()}:{pk_val}"
+        # key = f"{entity.capitalize()}:{pk_val}" # Changed take
+        # in consideration if errors
+        key = f"{entity}:{pk_val}"
         str_payload = {k: str(v) for k, v in payload.items()}
         data_type = self.get_data_type()
 
@@ -199,7 +213,9 @@ class RedisConnector(Connector, SparkTranslator):
 
     async def delete(self, entity: str, pk_col: str, pk_val: Any) -> int:
         r = self._get_client()
-        key = f"{entity.capitalize()}:{pk_val}"
+        # key = f"{entity.capitalize()}:{pk_val}" # Changed take
+        # in consideration if errors
+        key = f"{entity}:{pk_val}"
         return await r.delete(key)
 
     async def get_all(self, entity: str) -> List[Dict[str, Any]]:
@@ -299,7 +315,6 @@ class RedisConnector(Connector, SparkTranslator):
         to reduce cognitive complexity.
         """
         import json
-        import logging
 
         if data_type not in ["string", "json"]:
             # This is the 'hash' case
@@ -312,8 +327,11 @@ class RedisConnector(Connector, SparkTranslator):
                 continue
             try:
                 valid_results.append(json.loads(res))
-            except json.JSONDecodeError:
-                logging.warning(f"Could not decode JSON:{res}")
+            except (json.JSONDecodeError, TypeError):
+                # If it's already a dict (redis-py might handle JSON),
+                # just append
+                if isinstance(res, dict):
+                    valid_results.append(res)
         return iter(valid_results)
 
     @staticmethod
@@ -337,7 +355,9 @@ class RedisConnector(Connector, SparkTranslator):
         for key in partition_keys:
             if data_type == "hash":
                 pipe.hgetall(key)
-            else:  # string or json
+            elif data_type == "json":
+                pipe.json().get(key)
+            else:  # string
                 pipe.get(key)
         results = pipe.execute()
         r_sync.close()
@@ -347,61 +367,32 @@ class RedisConnector(Connector, SparkTranslator):
         return RedisConnector._process_redis_results(results, data_type)
 
     async def _resolve_key_pattern(self, table_name: str, data_type: str) -> str:
-        """
-        Determines the correct Redis key pattern by checking if keys exist
-        for Capitalized or lowercase table names.
-        """
         r = self._get_client()
+        # Try lowercase first (standard for this benchmark)
+        lower_pattern = f"{table_name.lower()}:*"
+        async for _ in r.scan_iter(match=lower_pattern, count=1):
+            return lower_pattern
 
-        # 1. Try Capitalized (Default)
+        # Try Capitalized
         cap_pattern = f"{table_name.capitalize()}:*"
-        if self._options.get("include_data_type_in_pk", False):
-            cap_pattern += f":{data_type}"
-
         async for _ in r.scan_iter(match=cap_pattern, count=1):
             return cap_pattern
 
-        # 2. Try Lowercase
-        lower_pattern = f"{table_name.lower()}:*"
-        if self._options.get("include_data_type_in_pk", False):
-            lower_pattern += f":{data_type}"
-
-        async for _ in r.scan_iter(match=lower_pattern, count=1):
-            msg = f"Detected lowercase keys for table '{table_name}'. "
-            msg += f"Using pattern: '{lower_pattern}'"
-            logging.info(msg)
-            return lower_pattern
-
-        # 3. Last resort debug: Log what IS in the database
-        logging.warning(
-            f"Table '{table_name}' not found with Capitalized or Lowercase patterns."
-        )
-
-        # Scan for ANY keys to give a hint about what's actually there
-        prefixes = set()
-        async for k in r.scan_iter(count=1000):
-            if ":" in k:
-                prefixes.add(k.split(":")[0])
-            if len(prefixes) >= 10:
-                break
-
-        if prefixes:
-            logging.info(f"DEBUG: Available table prefixes in Redis: {list(prefixes)}")
-        else:
-            logging.warning("DEBUG: Redis appears to be EMPTY.")
-
-        return cap_pattern
+        return lower_pattern  # Default
 
     async def _load_table_hash_spark(
         self, table_name: str, spark_session, target_schema, data_type
     ) -> "DataFrame":
-        """Loads a 'hash' table using the scalable spark-redis connector."""
-        logging.info(
-            f"Using scalable `spark-redis` connector for 'hash' table: {table_name}"
-            # noqa: E501
-        )
+        """
+        FAST PATH: Uses spark-redis connector.
+        Only works for 'hash' type.
+        """
+        logging.info(f"⚡ Using scalable `spark-redis` for table: {table_name}")
 
-        # [FIX] Resolve pattern dynamically based on existing data
+        # spark-redis expects "table" name mapping if we use the
+        # implicit "table:key" format
+        # Or we can use keys.pattern.
+        # We try to use the keys.pattern approach for maximum flexibility
         key_pattern = await self._resolve_key_pattern(table_name, data_type)
 
         redis_config = {
@@ -409,7 +400,8 @@ class RedisConnector(Connector, SparkTranslator):
             "port": str(self._port),
             "password": self._password,
             "key.pattern": key_pattern,
-            "infer.schema": "false",
+            # Tells spark-redis which keys to fetch
+            "infer.schema": "false",  # We provide schema
         }
 
         def _load_sync() -> "DataFrame":
@@ -429,35 +421,36 @@ class RedisConnector(Connector, SparkTranslator):
     async def _load_table_fallback_spark(
         self, table_name: str, spark_session, target_schema, data_type
     ) -> "DataFrame":
-        """Loads 'string' or 'json' tables using the
-        non-scalable mapPartitions method."""
-        msg = f"Using non-scalable `mapPartitions` loader for data_type '{data_type}'."
-        msg += " This will be slow and may crash on large tables."
+        """
+        SLOW PATH: Manually scans keys and fetches data.
+        Used for 'string' and 'json' types.
+        """
+        msg = "🐢 Using SLOW `mapPartitions` loader for data_type "
+        msg += f"'{data_type}' on table '{table_name}'."
         logging.warning(msg)
 
         r = self._get_client()
-        # Create a clean config dict to pass to workers
-        # (Do NOT pass 'self' or objects containing sockets)
         redis_config = {
             "host": self._host,
             "port": self._port,
             "password": self._password,
         }
-        num_slices = spark_session.sparkContext.defaultParallelism * 4
 
-        # [FIX] Resolve pattern dynamically based on existing data
         key_pattern = await self._resolve_key_pattern(table_name, data_type)
 
-        logging.info(f"Scanning Redis with pattern: '{key_pattern}'")
+        # SCANNING ALL KEYS TO DRIVER - This is the unavoidable bottleneck
+        # for non-Hash types
+        # without a custom RDD implementation
+        logging.info(f"Scanning Redis keys ({key_pattern})...")
         keys = [key async for key in r.scan_iter(key_pattern)]
         logging.info(f"Found {len(keys)} keys.")
 
         if not keys:
             return spark_session.createDataFrame([], target_schema)
 
+        num_slices = max(1, spark_session.sparkContext.defaultParallelism * 2)
         keys_rdd = spark_session.sparkContext.parallelize(keys, numSlices=num_slices)
 
-        # [CRITICAL FIX] Use RedisConnector class explicitly to avoid capturing 'self'
         data_rdd = keys_rdd.mapPartitions(
             lambda it: RedisConnector._fetch_redis_data_fallback(
                 it, redis_config, data_type
@@ -467,10 +460,8 @@ class RedisConnector(Connector, SparkTranslator):
         if data_rdd.isEmpty():
             return spark_session.createDataFrame([], target_schema)
 
-        df = data_rdd.toDF()
-        for field in target_schema.fields:
-            if field.name in df.columns:
-                df = df.withColumn(field.name, F.col(field.name).cast(field.dataType))
+        # Apply schema
+        df = spark_session.createDataFrame(data_rdd, schema=target_schema)
         return df
 
     async def _load_table_to_spark_df(
@@ -624,42 +615,85 @@ class RedisConnector(Connector, SparkTranslator):
             logging.warning(msg)
             return None
 
-    async def _process_csv_batch_redis(
-        self,
-        file_path: str,
-        cols: List[str],
-        dynamic_model: Any,
-    ) -> AsyncGenerator[List[Dict[str, Any]], None]:
-        """
-        [Sonar Refactor] Asynchronously reads a CSV file, validates rows,
-        and yields batches of processed data.
-        """
-        batch = []
-        try:
-            async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
-                content = await f.read()
-                reader = csv.reader(content.splitlines(), delimiter="|")
-                for line in reader:
-                    processed_row = self._process_row_for_redis(
-                        line, cols, dynamic_model
-                    )
-                    if processed_row:
-                        batch.append(processed_row)
-                        # Yield one by one for pipeline
-                        yield processed_row
+    # async def _process_csv_batch_redis(
+    #     self,
+    #     file_path: str,
+    #     cols: List[str],
+    #     dynamic_model: Any,
+    # ) -> AsyncGenerator[List[Dict[str, Any]], None]:
+    #     """
+    #     [Sonar Refactor] Asynchronously reads a CSV file, validates rows,
+    #     and yields batches of processed data.
+    #     """
+    #     batch = []
+    #     try:
+    #         async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
+    #             content = await f.read()
+    #             reader = csv.reader(content.splitlines(), delimiter="|")
+    #             for line in reader:
+    #                 processed_row = self._process_row_for_redis(
+    #                     line, cols, dynamic_model
+    #                 )
+    #                 if processed_row:
+    #                     batch.append(processed_row)
+    #                     # Yield one by one for pipeline
+    #                     yield processed_row
+    #
+    #     except FileNotFoundError:
+    #         logging.error(f"File not found: {file_path}")
+    #         raise
+    #     except Exception as e:
+    #         logging.error(f"Error during CSV processing for {file_path}: {e}")
+    #         raise
 
-        except FileNotFoundError:
-            logging.error(f"File not found: {file_path}")
-            raise
-        except Exception as e:
-            logging.error(f"Error during CSV processing for {file_path}: {e}")
-            raise
+    # async def bulk_insert(self, table_name: str, file_path: str) -> int:
+    #     """
+    #     [Sonar Refactor] Bulk inserts data from a file into the specified table.
+    #     Uses async I/O and delegates row processing to helpers.
+    #     """
+    #     r = self._get_client()
+    #     schema = self.catalogue.get_schema(table_name)
+    #     if not schema:
+    #         raise ValueError(f"No schema for table: {table_name}")
+    #
+    #     columns, pk_info = list(schema["columns"].keys()), schema["pk"]
+    #     dynamic_model = get_pydantic_model(table_name, schema)
+    #     data_type = self.get_data_type()
+    #     inserted_count = 0
+    #
+    #     async with r.pipeline(transaction=False) as pipe:
+    #         # Use the async generator to process batches
+    #         async for payload in self._process_csv_batch_redis(
+    #             file_path, columns, dynamic_model
+    #         ):
+    #             pk_val = (
+    #                 ":".join([str(payload[k]) for k in pk_info])
+    #                 if isinstance(pk_info, list)
+    #                 else payload[pk_info]
+    #             )
+    #             key = f"{table_name.capitalize()}:{pk_val}"
+    #             if self._options.get("include_data_type_in_pk", False):
+    #                 key += f":{data_type}"
+    #
+    #             str_payload = {k: str(v) for k, v in payload.items()}
+    #             logging.info(f"Bulk insert in {data_type} mode with key {key}")
+    #
+    #             if data_type == "string":
+    #                 await pipe.set(key, json.dumps(str_payload))
+    #             elif data_type == "json":
+    #                 await pipe.json().set(key, "$", str_payload)
+    #             else:
+    #                 await pipe.hset(key, mapping=str_payload)
+    #             inserted_count += 1
+    #
+    #         await pipe.execute()
+    #
+    #     return inserted_count
 
-    async def bulk_insert(self, table_name: str, file_path: str) -> int:
-        """
-        [Sonar Refactor] Bulk inserts data from a file into the specified table.
-        Uses async I/O and delegates row processing to helpers.
-        """
+    # [FIX] Added batch_size argument
+    async def bulk_insert(
+        self, table_name: str, file_path: str, batch_size: int = 5000
+    ) -> int:
         r = self._get_client()
         schema = self.catalogue.get_schema(table_name)
         if not schema:
@@ -671,7 +705,6 @@ class RedisConnector(Connector, SparkTranslator):
         inserted_count = 0
 
         async with r.pipeline(transaction=False) as pipe:
-            # Use the async generator to process batches
             async for payload in self._process_csv_batch_redis(
                 file_path, columns, dynamic_model
             ):
@@ -680,12 +713,12 @@ class RedisConnector(Connector, SparkTranslator):
                     if isinstance(pk_info, list)
                     else payload[pk_info]
                 )
-                key = f"{table_name.capitalize()}:{pk_val}"
-                if self._options.get("include_data_type_in_pk", False):
-                    key += f":{data_type}"
+
+                # Match the test loader logic: table:pk
+                # (Lower cased because we pass lowercase table_name usually)
+                key = f"{table_name.lower()}:{pk_val}"
 
                 str_payload = {k: str(v) for k, v in payload.items()}
-                logging.info(f"Bulk insert in {data_type} mode with key {key}")
 
                 if data_type == "string":
                     await pipe.set(key, json.dumps(str_payload))
@@ -695,6 +728,37 @@ class RedisConnector(Connector, SparkTranslator):
                     await pipe.hset(key, mapping=str_payload)
                 inserted_count += 1
 
+                if inserted_count % batch_size == 0:
+                    await pipe.execute()
+
             await pipe.execute()
 
         return inserted_count
+
+    # Helper for bulk_insert
+    async def _process_csv_batch_redis(
+        self,
+        file_path: str,
+        cols: List[str],
+        dynamic_model: Any,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        try:
+            async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
+                content = await f.read()
+                # Handle potential trailing newlines/pipes
+                lines = [line for line in content.splitlines() if line.strip()]
+                reader = csv.reader(lines, delimiter="|")
+                for line in reader:
+                    # TPC-H files sometimes have a trailing empty column due
+                    # to trailing pipe
+                    if len(line) > len(cols):
+                        line = line[: len(cols)]
+
+                    processed_row = self._process_row_for_redis(
+                        line, cols, dynamic_model
+                    )
+                    if processed_row:
+                        yield processed_row
+        except FileNotFoundError:
+            logging.error(f"File not found: {file_path}")
+            raise

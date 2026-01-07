@@ -160,46 +160,54 @@ class PostgresConnector(Connector):
             col_type = columns_schema.get(col_name)
             if value is None or value == "":
                 return None
-            if col_type in ("int", "bigint"):
-                return int(value)
-            if col_type in ("decimal", "real", "float", "double precision"):
-                return float(value)
-            if col_type == "date":
-                return datetime.strptime(value, "%Y-%m-%d").date()
-            if col_type == "timestamp":
-                return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+            try:
+                if col_type in ("int", "bigint"):
+                    return int(value)
+                if col_type in ("decimal", "real", "float", "double precision"):
+                    return float(value)
+                if col_type == "date":
+                    return datetime.strptime(value, "%Y-%m-%d").date()
+                if col_type == "timestamp":
+                    return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                # Fallback for malformed or incompatible data
+                return value
             return value
 
         recs_ins = []
-        # [FIX] Use aiofiles to read, but process as list of lines
-        async with aiofiles.open(
-            file_path, mode="r", encoding="utf-8", newline=""
-        ) as f:
-            content = await f.read()
+        try:
+            async with aiofiles.open(
+                file_path, mode="r", encoding="utf-8", newline=""
+            ) as f:
+                content = await f.read()
+                # Handle empty trailing lines
+                lines = [line for line in content.splitlines() if line.strip()]
+                reader = csv.reader(lines, delimiter="|")
 
-            # CRITICAL FIX: splitlines() ensures csv.reader
-            # gets a list of strings (lines),
-            # not a single huge string that it would iterate char-by-char.
-            reader = csv.reader(content.splitlines(), delimiter="|")
+                for row in reader:
+                    # Remove trailing empty field from pipe delimiter if present
+                    if len(row) > len(ordered_cols):
+                        row = row[: len(ordered_cols)]
 
-            for row in reader:
-                # TPC-H files often have a trailing delimiter,
-                # producing an empty string at the end.
-                # We remove it to match the column count.
-                if row and row[-1] == "":
-                    row = row[:-1]
+                    if len(row) != len(ordered_cols):
+                        msg = f"Skipping malformed row in {t_name}: "
+                        msg += f"len={len(row)} expected={len(ordered_cols)}"
+                        logging.warning(msg)
+                        continue
 
-                if len(row) != len(ordered_cols):
-                    msg = f"Skipping malformed row in {t_name}: {row}"
-                    logging.warning(msg)
-                    continue
+                    processed_row = tuple(
+                        cast_value(val, col) for val, col in zip(row, ordered_cols)
+                    )
+                    recs_ins.append(processed_row)
+        except FileNotFoundError:
+            logging.error(f"File not found: {file_path}")
+            return 0
 
-                processed_row = tuple(
-                    cast_value(val, col) for val, col in zip(row, ordered_cols)
-                )
-                recs_ins.append(processed_row)
+        if not recs_ins:
+            return 0
 
         async with conn.transaction():
+            # Truncate first to ensure clean state for benchmark
             await conn.execute(f'TRUNCATE TABLE "{t_name.lower()}" CASCADE;')
             await conn.copy_records_to_table(
                 t_name.lower(), records=recs_ins, columns=ordered_cols
