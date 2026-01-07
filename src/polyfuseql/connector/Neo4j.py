@@ -211,9 +211,9 @@ class Neo4jConnector(Connector, SparkTranslator):
                 read_schema_fields.append(field)
                 return_expressions.append(f"toInteger(n.{field.name}) AS {field.name}")
             elif isinstance(field.dataType, DateType):
-                # [FIX] Read Dates as Strings first to avoid
-                # 'UTF8String cannot be cast to Integer'
-                # Spark DateType is internally an int; if we pass a String raw
+                # [FIX] Read Dates as Strings first to avoid 'UTF8String
+                # cannot be cast to Integer'
+                # Spark DateType is internally an int; if we pass a String raw,
                 # it crashes.
                 read_schema_fields.append(StructField(field.name, StringType(), True))
                 return_expressions.append(f"toString(n.{field.name}) AS {field.name}")
