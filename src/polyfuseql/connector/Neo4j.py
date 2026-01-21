@@ -39,6 +39,19 @@ except ImportError:
     SPARK_AVAILABLE = False
 
 
+def _sanitize_value(value: Any) -> Any:
+    """
+    Recursively converts Decimal objects to floats to prevent Neo4j driver errors.
+    """
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, dict):
+        return {k: _sanitize_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_value(v) for v in value]
+    return value
+
+
 async def _execute_batch_insert(
     tx: AsyncTransaction, query: str, rows: List[Dict]
 ) -> int:
@@ -46,8 +59,11 @@ async def _execute_batch_insert(
     Helper function to execute a batch insert within a managed transaction.
     This function is passed to session.execute_write.
     """
+    # [FIX] Sanitize rows before passing to driver
+    sanitized_rows = _sanitize_value(rows)
+
     # Neo4j driver handles list of dicts for UNWIND efficiently
-    result = await tx.run(query, rows=rows)
+    result = await tx.run(query, rows=sanitized_rows)
     summary = await result.consume()
     return summary.counters.nodes_created
 
@@ -83,6 +99,7 @@ class Neo4jConnector(Connector, SparkTranslator):
                 self._uri, auth=self._auth, connection_timeout=600.0
             )
             logging.info("Neo4j driver initialized.")
+            # Verify connectivity
             await self.ping()
 
     async def disconnect(self) -> None:
@@ -112,9 +129,13 @@ class Neo4jConnector(Connector, SparkTranslator):
             rec = await result.single()
             return rec["n"] if rec else 0
 
-    async def get(
-        self, entity: str, pk_col: str, pk_val: Any
-    ) -> Dict[str, Any]:  # noqa:F501
+    async def get(self, entity: str, pk_col: str, pk_val: Any) -> Dict[str, Any]:
+        """
+        Fetch a single node by its primary key.
+        """
+        # [FIX] Sanitize pk_val (e.g. Decimal -> float)
+        pk_val = _sanitize_value(pk_val)
+
         driver = self._get_driver()
         async with driver.session() as s:
             cypher_match = f"MATCH (n:{entity.capitalize()}) "
@@ -129,6 +150,9 @@ class Neo4jConnector(Connector, SparkTranslator):
             return rec["p"] if rec and rec["p"] else {}
 
     async def insert(self, entity: str, payload: Dict[str, Any]) -> Any:
+        # [FIX] Sanitize payload (e.g. Decimal -> float)
+        payload = _sanitize_value(payload)
+
         driver = self._get_driver()
         props = ", ".join(f"`{k}`: ${k}" for k in payload.keys())
 
@@ -142,6 +166,10 @@ class Neo4jConnector(Connector, SparkTranslator):
     async def update(
         self, entity: str, pk_col: str, pk_val: Any, payload: Dict[str, Any]
     ) -> int:
+        # [FIX] Sanitize inputs
+        pk_val = _sanitize_value(pk_val)
+        payload = _sanitize_value(payload)
+
         driver = self._get_driver()
         async with driver.session() as s:
             cypher = f"MATCH (n:{entity.capitalize()} "
@@ -152,6 +180,9 @@ class Neo4jConnector(Connector, SparkTranslator):
             return summary.counters.properties_set
 
     async def delete(self, entity: str, pk_col: str, pk_val: Any) -> int:
+        # [FIX] Sanitize inputs
+        pk_val = _sanitize_value(pk_val)
+
         driver = self._get_driver()
         async with driver.session() as s:
             cypher = (
@@ -168,6 +199,10 @@ class Neo4jConnector(Connector, SparkTranslator):
         where_clause: Optional[str] = None,
         params: Optional[Dict] = None,
     ) -> List[Dict[str, Any]]:
+        # [FIX] Sanitize params for get_all as well
+        if params:
+            params = _sanitize_value(params)
+
         driver = self._get_driver()
         cypher_query = f"MATCH (n:{entity.capitalize()}) "
         if where_clause:
@@ -452,6 +487,11 @@ class Neo4jConnector(Connector, SparkTranslator):
             file_path, cols, dynamic_model, batch_size
         ):
             if batch:
+                # [FIX] Sanitize batch again just in case,
+                # though _process_row_for_neo4j handles it.
+                # Using _sanitize_value is safer recursively.
+                batch = _sanitize_value(batch)
+
                 async with driver.session() as s:
                     nodes_created = await s.execute_write(
                         _execute_batch_insert, cypher_query, batch
