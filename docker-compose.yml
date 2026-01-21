@@ -136,8 +136,14 @@ services:
       - CASSANDRA_AUTHORIZER=CassandraAuthorizer
       - CASSANDRA_USER=cassandra
       - CASSANDRA_PASSWORD=cassandra
+      - MAX_HEAP_SIZE=1024M
+      - HEAP_NEWSIZE=200M
     volumes:
       - polyfuseql-cassandra-data:/var/lib/cassandra
+    deploy:
+      resources:
+        limits:
+          memory: 2G
     healthcheck:
       test: [ "CMD-SHELL", "cqlsh -u cassandra -p cassandra -e 'describe keyspaces'" ]
       interval: 15s
@@ -160,9 +166,9 @@ services:
       - MONGO_URI=mongodb://root:example@mongodb:27017/
       - AUTH_DB_NAME=sql_middleware_auth
       - JWT_SECRET_KEY=dev-secret
-    depends_on:
-      mongodb:
-        condition: service_healthy
+    #depends_on:
+    #  mongodb:
+    #    condition: service_healthy
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:5000/health" ]
       interval: 10s

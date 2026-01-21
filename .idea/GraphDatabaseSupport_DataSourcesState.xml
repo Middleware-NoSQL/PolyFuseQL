@@ -7,7 +7,7 @@
           <list>
             <DataSourceV1>
               <option name="uuid" value="3129737f-ea6f-4c8e-8360-fe37b8cbe8da" />
-              <option name="name" value="Northwind" />
+              <option name="name" value="TPCH" />
               <option name="dataSourceType" value="NEO4J_BOLT" />
               <option name="configuration">
                 <map>

@@ -1,8 +1,12 @@
 import logging
+import csv
+import aiofiles
 from typing import Any, Dict, List, Optional
 
 import aiohttp
-import aiofiles
+from cassandra.cluster import Cluster
+from cassandra.auth import PlainTextAuthProvider
+from cassandra.query import BatchStatement, SimpleStatement
 from sqlglot import exp
 
 from polyfuseql.catalogue.Catalogue import Catalogue
@@ -33,8 +37,14 @@ class CassandraConnector(Connector):
         self.translator_url = settings.cassandra_translator_url
         self._http_session: Optional[aiohttp.ClientSession] = None
         self._translator_auth_token: Optional[str] = None
+
+        # Native connection for bulk loading
+        self._native_cluster = None
+        self._native_session = None
+
         logger.info(
-            f"CassandraConnector initialized for translator at {self.translator_url}"  # noqa:E501
+            f"CassandraConnector initialized for translator at {self.translator_url}"
+            # noqa:E501
         )
 
     async def ping(self) -> bool:
@@ -84,7 +94,8 @@ class CassandraConnector(Connector):
                     logger.info("Successfully authenticated and received JWT.")
                 else:
                     raise ConnectionError(
-                        "Authentication successful, but no access token received."  # noqa:E501
+                        "Authentication successful, but no access token received."
+                        # noqa:E501
                     )
         except aiohttp.ClientError as e:
             logger.error(f"Failed to authenticate with auth service: {e}")
@@ -110,11 +121,47 @@ class CassandraConnector(Connector):
             raise
 
     async def disconnect(self):
-        """Closes the HTTP session."""
+        """Closes the HTTP session and Native connection."""
         if self._http_session and not self._http_session.closed:
             await self._http_session.close()
             self._http_session = None
             logger.info("Cassandra translator HTTP session closed.")
+
+        if self._native_cluster:
+            self._native_cluster.shutdown()
+            self._native_cluster = None
+            self._native_session = None
+
+    def _connect_native(self):
+        """Establishes direct connection to Cassandra for admin/bulk tasks."""
+        if self._native_session:
+            return
+
+        hosts = [self.settings.host] if self.settings.host else ["localhost"]
+        port = self.settings.port or 9042
+
+        # Use credentials from settings or fall back to container defaults (cassandra/cassandra)
+        username = getattr(self.settings, "user", "cassandra")
+        password = getattr(self.settings, "password", "cassandra")
+
+        auth_provider = PlainTextAuthProvider(username=username, password=password)
+
+        logger.info(
+            f"Connecting natively to Cassandra at {hosts}:{port} with user {username}..."
+        )
+        self._native_cluster = Cluster(
+            contact_points=hosts, port=port, auth_provider=auth_provider
+        )
+        self._native_session = self._native_cluster.connect()
+
+        ks = self.settings.keyspace or "tpch"
+        self._native_session.execute(
+            f"""
+            CREATE KEYSPACE IF NOT EXISTS {ks}
+            WITH replication = {{'class': 'SimpleStrategy', 'replication_factor': 1}}
+        """
+        )
+        self._native_session.set_keyspace(ks)
 
     def _format_value(self, value: Any) -> str:
         """Formats a Python value into a SQL literal string."""
@@ -134,9 +181,8 @@ class CassandraConnector(Connector):
         and correctly parses the nested response based on diagnostic logs.
         """
         if not self._http_session:
-            raise ConnectionError(
-                "HTTP session not initialized. Call connect() first."
-            )  # noqa:E501
+            # Auto-connect if needed, or raise if strict lifecycle management is preferred
+            await self.connect()
 
         if not self._translator_auth_token:
             raise ConnectionError("Not authenticated. Cannot execute query.")
@@ -182,10 +228,6 @@ class CassandraConnector(Connector):
 
                 # For INSERT/UPDATE/DELETE, 'rows' can be null. For SELECT,
                 # it's a list.
-                # In all cases where rows are not returned, we return an
-                # empty list
-                # to match the test assertions
-                # (e.g., `assert insert_result == []`).
                 return rows if rows is not None else []
 
         except aiohttp.ClientResponseError as e:
@@ -193,7 +235,8 @@ class CassandraConnector(Connector):
                 f"Error from translator service: {e.status}, {e.message}"
             )  # noqa:E501
             raise ConnectionError(
-                f"Failed to communicate with Cassandra translator: {e.status} {e.message}"  # noqa:E501
+                f"Failed to communicate with Cassandra translator: {e.status} {e.message}"
+                # noqa:E501
             )
 
     async def query(
@@ -214,13 +257,46 @@ class CassandraConnector(Connector):
         return await self.query(sql)
 
     async def insert(self, entity: str, payload: Dict[str, Any]) -> Any:
-        """Builds and executes an INSERT statement via the translator."""
+        """
+        Builds and executes an INSERT statement via the translator.
+        [FIX] Uses catalogue schema to cast values to correct types before formatting
+        to ensure integers are not quoted in the generated SQL.
+        """
+        formatted_values = []
+        schema = self.catalogue.get_schema(entity)
+
+        for col, val in payload.items():
+            # Check schema to see if we need to force cast from string to number
+            # This prevents _format_value from wrapping integers in quotes
+            if schema and "columns" in schema and col in schema["columns"]:
+                col_type = schema["columns"][col]
+                logging.info(f"cassandra insert col_type: {col_type}")
+                if col_type == "int":
+                    try:
+                        val = int(val)
+                        logging.info(f"val: {val} of type should be int: {type(val)}")
+                    except ValueError as ve:
+                        # Let _format_value handle it if cast fails
+                        logging.info(f"Error: {ve}")
+                elif col_type in ("decimal", "float"):
+                    try:
+                        val = float(val)
+                        logging.info(
+                            f"val: {val} of type should be float/decimal: {type(val)}"
+                        )
+                    except ValueError as ve:
+                        logging.info(f"Error: {ve}")
+
+            formatted_values.append(self._format_value(val))
+
         cols = ", ".join(payload.keys())
-        vals = ", ".join(self._format_value(v) for v in payload.values())
+        vals = ", ".join(formatted_values)
         sql = f"INSERT INTO {entity} ({cols}) VALUES ({vals})"
-        # The API returns no meaningful data for insert,
-        # so we return the result
-        # of the execution, which will be an empty list.
+
+        logger.info(f"Cassandra insert SQL generated: {sql}")
+        print(f"Cassandra insert SQL generated: {sql}")
+
+        # The API returns no meaningful data for insert
         return await self.query(sql)
 
     async def update(
@@ -232,25 +308,18 @@ class CassandraConnector(Connector):
         pk_val_formatted = self._format_value(pk_val)
         sql = f"UPDATE {entity} SET {set_clause} WHERE {pk_col} = {pk_val_formatted}"  # noqa:E501
         await self._execute_via_translator(sql)
-        # The API doesn't return an affected row count for updates.
-        # Returning 1 to signify success,
-        # as per the abstract method's contract.
         return 1
 
     async def delete(self, entity: str, pk_col: str, pk_val: Any) -> int:
         pk_val_formatted = self._format_value(pk_val)
         sql = f"DELETE FROM {entity} WHERE {pk_col} = {pk_val_formatted}"
         await self._execute_via_translator(sql)
-        # The API doesn't return an affected row count for deletes.
-        # Returning 1 to signify success.
         return 1
 
     async def count(self, entity: str) -> int:
         sql = f"SELECT COUNT(*) FROM {entity}"
         result = await self._execute_via_translator(sql)
-        # Based on logs, the response is `[{'count': '2'}]`
         if result and isinstance(result, list) and len(result) > 0:
-            # The count value is returned as a string.
             count_value = result[0].get("count", 0)
             return int(count_value)
         return 0
@@ -265,31 +334,128 @@ class CassandraConnector(Connector):
         return await self._execute_via_translator(ast.sql())
 
     async def bulk_insert(self, table_name: str, file_path: str) -> int:
-        logger.warning(
-            "Performing row-by-row bulk insert for Cassandra via translator. This may be slow."  # noqa:E501
+        """
+        Directly connects to Cassandra to CREATE TABLE and INSERT data.
+        Bypasses translator for setup/bulk loading to ensure schema exists and for speed.
+        [FIX] Handles "Invalid STRING constant" errors by strictly converting types
+        and ignoring individual row failures to ensure as much data as possible is loaded.
+        """
+        self._connect_native()
+
+        schema = self.catalogue.get_schema(table_name)
+        if not schema:
+            logger.error(f"No schema for {table_name}")
+            return 0
+
+        # 1. Drop and Create Table (DDL)
+        self._native_session.execute(f"DROP TABLE IF EXISTS {table_name}")
+
+        cols_def = []
+        type_map = {
+            "int": "int",
+            "str": "text",
+            "decimal": "decimal",
+            "date": "date",
+            "float": "float",
+        }
+
+        for col, dtype in schema["columns"].items():
+            cql_type = type_map.get(dtype, "text")
+            cols_def.append(f"{col} {cql_type}")
+
+        pk = schema["pk"]
+        if isinstance(pk, list):
+            pk_str = f"({pk[0]}), {', '.join(pk[1:])}"
+        else:
+            pk_str = pk
+
+        create_sql = (
+            f"CREATE TABLE {table_name} ({', '.join(cols_def)}, PRIMARY KEY ({pk_str}))"
         )
+        logger.info(f"Creating table: {create_sql}")
+        self._native_session.execute(create_sql)
+
+        # 2. Prepared Insert
+        col_names = list(schema["columns"].keys())
+        phs = ", ".join(["?"] * len(col_names))
+        insert_stmt = self._native_session.prepare(
+            f"INSERT INTO {table_name} ({', '.join(col_names)}) VALUES ({phs})"
+        )
+
+        # 3. Batch Load
         count = 0
-        import csv
+        inserted = 0
+        batch = BatchStatement()
+        BATCH_SIZE = 50  # Reduced batch size to minimize fallout from one bad row
 
         try:
-            # SonarQube Fix (python:S7493): Use aiofiles for async file I/O
-            async with aiofiles.open(
-                file_path, mode="r", encoding="utf-8", newline=""
-            ) as f:
-                # Read the file content asynchronously
+            async with aiofiles.open(file_path, mode="r", encoding="utf-8") as f:
                 content = await f.read()
-                # csv.DictReader expects an iterator of lines
-                reader = csv.DictReader(content.splitlines())
-                for row in reader:
-                    # Filter out None values from the row
-                    clean_row = {k: v for k, v in row.items() if v is not None}
-                    if clean_row:
-                        await self.insert(table_name, clean_row)
+                lines = [l for l in content.splitlines() if l.strip()]
+                reader = csv.reader(lines, delimiter="|")
+
+                for row_idx, row in enumerate(reader):
+                    if len(row) > len(col_names):
+                        row = row[: len(col_names)]
+
+                    # [DEBUG] Verbose logging for raw row data (Info level for visibility)
+                    logger.info(f"Raw row {row_idx}: {row}")
+
+                    clean_row = []
+                    valid_row = True
+                    for i, col in enumerate(col_names):
+                        val = row[i]
+                        ctype = schema["columns"][col]
+
+                        # [FIX] Strict Type Conversion Logic
+                        # If catalogue says "int", we MUST cast to int.
+                        # If cast fails, we flag the row invalid rather than passing string
+                        try:
+                            if ctype == "int":
+                                # Remove quotes if present to ensure clean int conversion
+                                val = int(str(val).replace("'", "").replace('"', ""))
+                            elif ctype in ["decimal", "float"]:
+                                val = float(str(val).replace("'", "").replace('"', ""))
+                            # Cassandra Date: keep string 'YYYY-MM-DD'
+                            # Strings: keep as is
+                        except ValueError as e:
+                            # Log specific failure for debugging "Invalid STRING constant"
+                            logger.warning(
+                                f"Row {row_idx} skipped. Type conversion failed for col '{col}' value '{val}': {e}"
+                            )
+                            valid_row = False
+                            break
+
+                        clean_row.append(val)
+
+                    if valid_row:
+                        # [DEBUG] Verbose logging for converted row data
+                        logger.info(f"Row {row_idx} converted: {clean_row}")
+                        batch.add(insert_stmt, clean_row)
                         count += 1
-            return count
-        except FileNotFoundError:
-            logger.error(f"Bulk insert file not found: {file_path}")
-            return 0
+
+                    if count >= BATCH_SIZE:
+                        try:
+                            self._native_session.execute(batch)
+                            inserted += count
+                        except Exception as e:
+                            logger.error(
+                                f"Batch failed for {table_name} at row {row_idx}: {e}"
+                            )
+                            # Proceed to next batch
+                        finally:
+                            count = 0
+                            batch = BatchStatement()
+
+                if count > 0:
+                    try:
+                        self._native_session.execute(batch)
+                        inserted += count
+                    except Exception as e:
+                        logger.error(f"Final batch failed for {table_name}: {e}")
+
+            return inserted
+
         except Exception as e:
-            logger.error(f"Bulk insert failed: {e}")
-            raise
+            logger.error(f"Bulk insert failed for {table_name}: {e}")
+            return 0

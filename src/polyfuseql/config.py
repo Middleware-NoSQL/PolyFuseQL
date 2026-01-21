@@ -45,6 +45,8 @@ class MongoDbSettings(BaseModel):
     host: str = "localhost"
     port: int = 27018
     db: str = "mydatabase"
+    api_user: str = "admin"
+    api_password: str = "admin123"
 
 
 class CassandraAuthSettings(BaseModel):
