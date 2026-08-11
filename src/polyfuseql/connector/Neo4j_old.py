@@ -129,38 +129,23 @@ class Neo4jConnector(Connector, SparkTranslator):
             rec = await result.single()
             return rec["n"] if rec else 0
 
-    def _build_pk_match(self, entity: str, pk_col: Any, pk_val: Any) -> tuple[str, dict]:
-        label_mapping = {
-            "partsupp": "PartSupp",
-            "orders": "Order",
-            "lineitem": "LineItem"
-        }
-        label = label_mapping.get(entity.lower(), entity.capitalize())
-        match_clause = f"MATCH (n:{label}) "
-        if isinstance(pk_col, list):
-            conditions = []
-            params = {}
-            if not isinstance(pk_val, (list, tuple)):
-                conditions.append(f"n.`{pk_col[0]}` = $pk_val_0")
-                params["pk_val_0"] = _sanitize_value(pk_val)
-            else:
-                for i, (col, val) in enumerate(zip(pk_col, pk_val)):
-                    conditions.append(f"n.`{col}` = $pk_val_{i}")
-                    params[f"pk_val_{i}"] = _sanitize_value(val)
-            where_clause = "WHERE " + " AND ".join(conditions) + " "
-            return match_clause + where_clause, params
-        else:
-            return match_clause + f"WHERE n.`{pk_col}` = $pk_val ", {"pk_val": _sanitize_value(pk_val)}
-
-    async def get(self, entity: str, pk_col: Any, pk_val: Any) -> Dict[str, Any]:
+    async def get(self, entity: str, pk_col: str, pk_val: Any) -> Dict[str, Any]:
         """
         Fetch a single node by its primary key.
         """
+        # [FIX] Sanitize pk_val (e.g. Decimal -> float)
+        pk_val = _sanitize_value(pk_val)
+
         driver = self._get_driver()
         async with driver.session() as s:
-            cypher_base, params = self._build_pk_match(entity, pk_col, pk_val)
-            cypher = cypher_base + "RETURN properties(n) AS p LIMIT 1"
-            result = await s.run(cypher, **params)
+            cypher_match = f"MATCH (n:{entity.capitalize()}) "
+            cypher_where = f"WHERE n.`{pk_col}` "
+            cypher = (
+                cypher_match
+                + cypher_where
+                + "= $pk_val RETURN properties(n) AS p LIMIT 1"
+            )
+            result = await s.run(cypher, pk_val=pk_val)
             rec = await result.single()
             return rec["p"] if rec and rec["p"] else {}
 
@@ -171,13 +156,7 @@ class Neo4jConnector(Connector, SparkTranslator):
         driver = self._get_driver()
         props = ", ".join(f"`{k}`: ${k}" for k in payload.keys())
 
-        label_mapping = {
-            "partsupp": "PartSupp",
-            "orders": "Order",
-            "lineitem": "LineItem"
-        }
-        label = label_mapping.get(entity.lower(), entity.capitalize())
-        cypher = f"CREATE (n:{label} {{ {props} }}) "
+        cypher = f"CREATE (n:{entity.capitalize()} {{ {props} }}) "
         cypher += "RETURN properties(n) as p"
         async with driver.session() as s:
             result = await s.run(cypher, **payload)
@@ -185,23 +164,32 @@ class Neo4jConnector(Connector, SparkTranslator):
             return rec["p"] if rec else {}
 
     async def update(
-        self, entity: str, pk_col: Any, pk_val: Any, payload: Dict[str, Any]
+        self, entity: str, pk_col: str, pk_val: Any, payload: Dict[str, Any]
     ) -> int:
+        # [FIX] Sanitize inputs
+        pk_val = _sanitize_value(pk_val)
         payload = _sanitize_value(payload)
+
         driver = self._get_driver()
         async with driver.session() as s:
-            cypher_base, params = self._build_pk_match(entity, pk_col, pk_val)
-            cypher = cypher_base + "SET n += $payload"
-            result = await s.run(cypher, payload=payload, **params)
+            cypher = f"MATCH (n:{entity.capitalize()} "
+            cypher += f"{{`{pk_col}`: $pk_val}}) "
+            cypher += "SET n += $payload"
+            result = await s.run(cypher, pk_val=pk_val, payload=payload)
             summary = await result.consume()
             return summary.counters.properties_set
 
-    async def delete(self, entity: str, pk_col: Any, pk_val: Any) -> int:
+    async def delete(self, entity: str, pk_col: str, pk_val: Any) -> int:
+        # [FIX] Sanitize inputs
+        pk_val = _sanitize_value(pk_val)
+
         driver = self._get_driver()
         async with driver.session() as s:
-            cypher_base, params = self._build_pk_match(entity, pk_col, pk_val)
-            cypher = cypher_base + "DETACH DELETE n"
-            result = await s.run(cypher, **params)
+            cypher = (
+                f"MATCH (n:{entity.capitalize()} {{{pk_col}: $pk_val}}) "
+                "DETACH DELETE n"
+            )
+            result = await s.run(cypher, pk_val=pk_val)
             summary = await result.consume()
             return summary.counters.nodes_deleted
 
@@ -231,52 +219,83 @@ class Neo4jConnector(Connector, SparkTranslator):
         self, table_name: str, spark_session
     ) -> "DataFrame":
         """
-        [OPTIMIZATION: PARALLEL NEO4J READS]
-        Uses Neo4j Spark Connector's native `.option("labels", ...)` feature instead
-        of a raw Cypher query. Passing a raw query forces Spark to execute on a
-        single partition/thread. Using labels allows the connector to divide the read
-        across the cluster.
+        [Sonar Refactor] Loads a single table from Neo4j into a Spark DataFrame
+        This helper function is called by join(), group_by(), and aggregate()
+        to eliminate code duplication.
         """
-        # Neo4j labels from load_neo4j.cypher are not just capitalized
-        label_mapping = {
-            "partsupp": "PartSupp",
-            "orders": "Order",
-            "lineitem": "LineItem"
-        }
-        label = label_mapping.get(table_name.lower(), table_name.capitalize())
+        label = table_name.capitalize()
         spark_schema = self._get_spark_schema(table_name)
-        
-        # Calculate optimal partitions based on available executors
-        partitions = str(max(8, spark_session.sparkContext.defaultParallelism * 4))
 
+        # 1. Build the Cypher query and read schema
+        # We must cast Neo4j's decimals to floats, as the Spark connector
+        # has better support for Spark's DoubleType.
+        read_schema_fields = []
+        return_expressions = []
+        date_cols = []  # Track columns that need casting to DateType
+
+        for field in spark_schema.fields:
+            if isinstance(field.dataType, (DecimalType, DoubleType)):
+                read_schema_fields.append(
+                    StructField(field.name, DoubleType(), True)
+                )  # noqa:E501
+                return_expressions.append(
+                    f"toFloat(n.{field.name}) AS {field.name}"
+                )  # noqa:E501
+            elif isinstance(field.dataType, (IntegerType, LongType)):
+                # Keep LongType for IDs/integers to avoid overflow/casting issues
+                read_schema_fields.append(StructField(field.name, LongType(), True))
+                return_expressions.append(f"toInteger(n.{field.name}) AS {field.name}")
+            elif isinstance(field.dataType, DateType):
+                # [FIX] Read Dates as Strings first to avoid 'UTF8String
+                # cannot be cast to Integer'
+                # Spark DateType is internally an int; if we pass a String raw,
+                # it crashes.
+                read_schema_fields.append(StructField(field.name, StringType(), True))
+                return_expressions.append(f"toString(n.{field.name}) AS {field.name}")
+                date_cols.append(field.name)
+            else:
+                read_schema_fields.append(field)
+                return_expressions.append(f"n.{field.name} AS {field.name}")
+
+        read_schema = StructType(read_schema_fields)
+        label_str = f"MATCH (n:{label})"
+        return_str = f"RETURN {', '.join(return_expressions)}"
+        cypher_query = f"{label_str} {return_str}"
+
+        # 2. Define the synchronous Spark-loading function
         def _load_sync() -> "DataFrame":
-            # Load raw nodes dynamically spread across partitions
+            # try:
             df = (
                 spark_session.read.format("org.neo4j.spark.DataSource")
                 .option("url", self._uri)
                 .option("authentication.type", "basic")
                 .option("authentication.basic.username", self._auth[0])
                 .option("authentication.basic.password", self._auth[1])
-                .option("labels", label)
-                .option("partitions", partitions)
+                .option("query", cypher_query)
+                .schema(read_schema)
                 .load()
             )
 
-            # Cast columns back to their proper types in PySpark rather than inside Cypher
+            # 3. Cast columns back to their proper types
             for field in spark_schema.fields:
-                if isinstance(field.dataType, (DecimalType, DoubleType)):
-                    df = df.withColumn(field.name, F.col(field.name).cast(DoubleType()))
-                elif isinstance(field.dataType, (IntegerType, LongType)):
-                    df = df.withColumn(field.name, F.col(field.name).cast(LongType()))
-                elif isinstance(field.dataType, DateType):
-                    # Dates come back correctly usually, but cast strictly to ensure Type matching
-                    df = df.withColumn(field.name, F.col(field.name).cast(DateType()))
-                else:
-                    df = df.withColumn(field.name, F.col(field.name).cast(StringType()))
+                if isinstance(field.dataType, DecimalType):
+                    df = df.withColumn(
+                        field.name, F.col(field.name).cast(field.dataType)
+                    )
+
+            # [FIX] Explicitly cast String dates to Spark DateType
+            for col_name in date_cols:
+                df = df.withColumn(col_name, F.col(col_name).cast(DateType()))
 
             return df
+            # except Exception as e:
+            #    logging.error(f"Failed to load data using spark-neo4j: {e}")
+            #    return spark_session.createDataFrame([], spark_schema)
 
-        logging.info(f"Loading table '{table_name}' using `spark-neo4j` parallel connector.")
+        # 4. Bridge from async to sync Spark execution
+        logging.info(
+            f"Loading table '{table_name}' using `spark-neo4j` connector."
+        )  # noqa:E501
         df = await asyncio.to_thread(_load_sync)
         return df
 
@@ -334,41 +353,12 @@ class Neo4jConnector(Connector, SparkTranslator):
         self, sql: str, params: Optional[tuple] = None
     ) -> List[Dict[str, Any]]:
         """
-        Executes a raw SQL query using PySpark.
-        Includes robust retry logic to handle native connector failures.
+        Raw SQL queries are not supported. This connector translates SQL,
+        but does not execute raw Cypher.
         """
-        if not SPARK_AVAILABLE:
-            raise NotImplementedError("PySpark is required for executing SQL on Neo4j.")
-
-        import time
-        from sqlglot import parse_one
-
-        logging.info(f"--- Starting Neo4j Query Execution ---")
-        logging.info(f"SQL: {sql[:200]}..." if len(sql) > 200 else f"SQL: {sql}")
-        start_time = time.time()
-
-        try:
-            parsed = parse_one(sql)
-        except Exception as e:
-            logging.warning(f"SQL parsing failed: {e}")
-            parsed = None
-
-        spark = get_spark_session()
-
-        if parsed:
-            await self._ensure_tables_loaded(parsed, spark)
-
-        try:
-            df = spark.sql(sql)
-            results = [row.asDict() for row in df.collect()]
-            
-            duration = time.time() - start_time
-            logging.info(f"--- Query Completed in {duration:.2f}s. Rows returned: {len(results)} ---")
-            
-            return [_camelize_keys(row) for row in results]
-        except Exception as e:
-            logging.error(f"Query Failed ({sql}) (neo4j): {e}")
-            return []
+        raise NotImplementedError(
+            "Neo4jConnector expects Cypher, not SQL, for generic queries."
+        )
 
     # --- ADDED 'group_by' METHOD ---
     async def group_by(self, ast: exp.Select) -> List[Dict[str, Any]]:

@@ -1,0 +1,18 @@
+backend,query_type,latency_s,success,validation_passed,cpu_usage,ram_usage_mb,scale,error,cpu,ram_gb,ospostgres,Bulk Load,7.76115,True,True,50.6,173.265625,10.0,,64,377.1,Linux
+postgres,Bulk Load,5.65733,True,True,58.0,178.078125,10.0,,64,377.1,Linux
+postgres,Point Lookup (Order),0.00305,True,True,54.5,126.9453125,10.0,,64,377.1,Linux
+postgres,Point Lookup (Customer),0.00065,True,True,50.6,126.9453125,10.0,,64,377.1,Linux
+postgres,Range Scan (LineItems),0.00115,True,True,58.0,126.95703125,10.0,,64,377.1,Linux
+postgres,Simple Filter (Status),0.00113,True,True,88.5,126.95703125,10.0,,64,377.1,Linux
+postgres,Write (Insert),0,False,False,0.0,126.95703125,10.0,,64,377.1,Linux
+redis,Bulk Load,149.60308,True,True,8.4,145.6640625,10.0,,64,377.1,Linux
+redis,Point Lookup (Order),0.00063,True,True,105.2,134.75390625,10.0,,64,377.1,Linux
+redis,Point Lookup (Customer),0.00053,True,True,125.2,134.75390625,10.0,,64,377.1,Linux
+redis,Range Scan (LineItems),2.99439,True,True,2.5,134.7578125,10.0,,64,377.1,Linux
+redis,Simple Filter (Status),0.32987,True,True,11.9,133.9453125,10.0,,64,377.1,Linux
+redis,Write (Insert),0.00127,True,True,78.0,133.9453125,10.0,,64,377.1,Linux
+mongodb,Point Lookup (Order),0.00311,True,True,53.4,112.98046875,10.0,64,377.1,Linux
+mongodb,Point Lookup (Customer),0.00256,True,True,64.8,113.23828125,10.0,64,377.1,Linux
+mongodb,Range Scan (LineItems),0.00243,True,True,68.5,113.49609375,10.0,64,377.1,Linux
+mongodb,Simple Filter (Status),0.00268,True,True,49.6,113.49609375,10.0,64,377.1,Linux
+mongodb,Write (Insert),0.00268,True,True,61.9,113.49609375,10.0,64,377.1,Linux

@@ -151,37 +151,9 @@ class SelectStrategy(QueryStrategy):
 
         # Case 3: Simple SELECT...WHERE... query
         if ast.args.get("where"):
-            # [FIX] Determine if we should use PK optimization or Generic Query
-            is_pk_lookup = False
-            where_expr = ast.args.get("where").this
-            
-            try:
-                # Check if the column in the WHERE clause matches the Table's PK
-                table_name = ast.find(exp.Table).name
-                pk_col_defined = self._get_pk_column(where_expr, use_catalogue, client, table_name)
-                
-                # Extract column name from expression (assuming simple equality)
-                if isinstance(where_expr, exp.EQ) and isinstance(where_expr.left, exp.Column):
-                    col_name_in_query = where_expr.left.name
-                    # If the filtered column IS the primary key, use the optimization
-                    if pk_col_defined == col_name_in_query or pk_col_defined == col_name_in_query.lower():
-                        is_pk_lookup = True
-            except Exception:
-                # If we can't determine it (e.g. no schema), fall back safely
-                pass
-
-            if is_pk_lookup:
-                return await self._handle_select_by_pk(
-                    conn, ast, use_catalogue, client
-                )  # noqa:E501
-            else:
-                # [FIX] Fallback for filtering by non-PK columns (e.g. o_orderstatus='F')
-                try:
-                    return await conn.query(ast.sql())
-                except NotImplementedError:
-                    # If connector (like Redis) doesn't support generic queries, return empty to avoid crash
-                    logging.warning(f"Backend '{backend}' does not support generic SQL queries for filters.")
-                    return []
+            return await self._handle_select_by_pk(
+                conn, ast, use_catalogue, client
+            )  # noqa:E501
 
         # Case 4: Simple SELECT (no WHERE)
         return await self._handle_select_all(conn, ast)

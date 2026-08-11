@@ -2,7 +2,7 @@ import json
 import logging
 import csv
 from datetime import datetime
-from typing import Dict, Any, Optional, List, Union
+from typing import Dict, Any, Optional, List
 import asyncpg
 import aiofiles
 
@@ -72,39 +72,18 @@ class PostgresConnector(Connector):
         row = await conn.fetchrow(query)
         return int(row["n"]) if row else 0
 
-    async def get(self, table: str, pk_col: Union[str, List[str]], pk_val: Any) -> Dict:
+    async def get(self, table: str, pk_col: str, pk_val: Any) -> Dict:
+        # TODO Correctfully use of the select logic if the GET will be used
+        #  liske that
+        if not isinstance(pk_col, str):
+            msg = "Primary key column name must be a string, got "
+            msg += f"{type(pk_col).__name__}"
+            raise TypeError(msg)
         conn = self._get_conn()
         table_name = table.lower()
-        
-        # [FIX] Handle Composite Primary Keys (List) or Partial Keys
-        if isinstance(pk_col, list):
-            conditions = []
-            values = []
-            if not isinstance(pk_val, (list, tuple)):
-                 # Single value for composite key? Match first col only
-                 col_name = _snake_case(pk_col[0])
-                 conditions.append(f'"{col_name}" = $1')
-                 values.append(pk_val)
-            else:
-                 for i, (col, val) in enumerate(zip(pk_col, pk_val)):
-                     conditions.append(f'"{_snake_case(col)}" = ${i+1}')
-                     values.append(val)
-            
-            where_clause = " AND ".join(conditions)
-            query = f'SELECT row_to_json(t) FROM "{table_name}" t WHERE {where_clause}'
-            try:
-                row = await conn.fetchrow(query, *values)
-            except Exception as e:
-                logging.warning(f"Error in composite GET for {table_name}: {e}")
-                return {}
-
-        elif isinstance(pk_col, str):
-            query = f'SELECT row_to_json(t) FROM "{table_name}" t WHERE "{pk_col}" = $1'
-            row = await conn.fetchrow(query, pk_val)
-        else:
-            msg = f"Primary key column name must be a string or list, got {type(pk_col).__name__}"
-            raise TypeError(msg)
-
+        query = f'SELECT row_to_json(t) FROM "{table_name}" t '
+        query += f'WHERE "{pk_col}" = $1'
+        row = await conn.fetchrow(query, pk_val)
         if not row:
             return {}
         data = json.loads(row.get("row_to_json"))
@@ -123,36 +102,12 @@ class PostgresConnector(Connector):
     async def insert(self, table: str, payload: Dict[str, Any]) -> Any:
         conn = self._get_conn()
         table_name = table.lower()
-        
-        # [FIX] Type Casting using Schema
-        schema = self.catalogue.get_schema(table_name) if self.catalogue else None
-        columns_schema = schema.get("columns", {}) if schema else {}
-
-        db_payload = {}
-        for k, v in payload.items():
-            key = _snake_case(k)
-            val = v
-            # [FIX] Type Casting for asyncpg compatibility (Dates)
-            col_type_raw = columns_schema.get(key)
-            col_type = str(col_type_raw).lower() if col_type_raw else ""
-            if isinstance(val, str) and val:
-                try:
-                    if "date" in col_type:
-                        val = datetime.strptime(val, "%Y-%m-%d").date()
-                    elif "timestamp" in col_type:
-                        try:
-                            val = datetime.strptime(val, "%Y-%m-%d %H:%M:%S")
-                        except ValueError:
-                            val = datetime.strptime(val, "%Y-%m-%d")
-                except ValueError:
-                    pass
-            db_payload[key] = val
-
+        db_payload = {_snake_case(k): v for k, v in payload.items()}
         cols = ", ".join(f'"{k}"' for k in db_payload.keys())
         ph = ", ".join(f"${i + 1}" for i in range(len(db_payload)))
         values = list(db_payload.values())
-        
-        sql_query = f'INSERT INTO "{table_name}" ({cols}) VALUES ({ph}) RETURNING *'
+        sql_query = f'INSERT INTO "{table_name}" ({cols}) '
+        sql_query += f"VALUES ({ph}) RETURNING *"
         row = await conn.fetchrow(sql_query, *values)
         return _camelize_keys(dict(row)) if row else {}
 
@@ -171,35 +126,16 @@ class PostgresConnector(Connector):
         conn = self._get_conn()
         table_name = table.lower()
         dpc = _snake_case(pk_col)
-        
-        schema = self.catalogue.get_schema(table_name) if self.catalogue else None
-        columns_schema = schema.get("columns", {}) if schema else {}
-        
         set_clauses = []
         values = []
         for i, (key, value) in enumerate(payload.items()):
             db_key = _snake_case(key)
-            val = value
-            col_type_raw = columns_schema.get(db_key)
-            col_type = str(col_type_raw).lower() if col_type_raw else ""
-            if isinstance(val, str) and val:
-                try:
-                    if "date" in col_type:
-                        val = datetime.strptime(val, "%Y-%m-%d").date()
-                    elif "timestamp" in col_type:
-                        try:
-                            val = datetime.strptime(val, "%Y-%m-%d %H:%M:%S")
-                        except ValueError:
-                            val = datetime.strptime(val, "%Y-%m-%d")
-                except ValueError:
-                    pass
-
             set_clauses.append(f'"{db_key}" = ${i + 1}')
-            values.append(val)
-
+            values.append(value)
         scs = ", ".join(set_clauses)
         values.append(pk_val)
-        query = f'UPDATE "{table_name}" SET {scs} WHERE "{dpc}" = ${len(values)}'
+        query = f'UPDATE "{table_name}" SET {scs}'
+        query += f' WHERE "{dpc}" = ${len(values)}'
         result = await conn.execute(query, *values)
         updated_count = int(result.split(" ")[1])
         return updated_count
@@ -234,6 +170,7 @@ class PostgresConnector(Connector):
                 if col_type == "timestamp":
                     return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
             except ValueError:
+                # Fallback for malformed or incompatible data
                 return value
             return value
 
@@ -243,14 +180,21 @@ class PostgresConnector(Connector):
                 file_path, mode="r", encoding="utf-8", newline=""
             ) as f:
                 content = await f.read()
+                # Handle empty trailing lines
                 lines = [line for line in content.splitlines() if line.strip()]
                 reader = csv.reader(lines, delimiter="|")
 
                 for row in reader:
+                    # Remove trailing empty field from pipe delimiter if present
                     if len(row) > len(ordered_cols):
                         row = row[: len(ordered_cols)]
+
                     if len(row) != len(ordered_cols):
+                        msg = f"Skipping malformed row in {t_name}: "
+                        msg += f"len={len(row)} expected={len(ordered_cols)}"
+                        logging.warning(msg)
                         continue
+
                     processed_row = tuple(
                         cast_value(val, col) for val, col in zip(row, ordered_cols)
                     )
@@ -263,6 +207,7 @@ class PostgresConnector(Connector):
             return 0
 
         async with conn.transaction():
+            # Truncate first to ensure clean state for benchmark
             await conn.execute(f'TRUNCATE TABLE "{t_name.lower()}" CASCADE;')
             await conn.copy_records_to_table(
                 t_name.lower(), records=recs_ins, columns=ordered_cols

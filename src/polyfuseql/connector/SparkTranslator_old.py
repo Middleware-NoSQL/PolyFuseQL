@@ -1,4 +1,3 @@
-import operator
 from decimal import Decimal, InvalidOperation
 from sqlglot import exp
 
@@ -17,32 +16,6 @@ class SparkTranslator:
     This allows Connectors (like Redis and Neo4j) to share the same
     logic for converting sqlglot expressions into Spark Columns.
     """
-
-    # [OPTIMIZATION] Shifted mapping dictionaries to class-level attributes 
-    # to avoid redundant allocations during deep AST recursions.
-    # Replaced lambda functions with direct operator imports for faster execution.
-    _OP_MAP = {
-        exp.Mul: operator.mul,
-        exp.Sub: operator.sub,
-        exp.Add: operator.add,
-        exp.Div: operator.truediv,
-        exp.EQ: operator.eq,
-        exp.NEQ: operator.ne,
-        exp.GT: operator.gt,
-        exp.GTE: operator.ge,
-        exp.LT: operator.lt,
-        exp.LTE: operator.le,
-        exp.And: operator.and_,
-        exp.Or: operator.or_,
-    }
-
-    _AGG_MAP = {
-        exp.Sum: "sum",
-        exp.Avg: "avg",
-        exp.Count: "count",
-        exp.Min: "min",
-        exp.Max: "max",
-    }
 
     def _translate_alias(self, expression: exp.Alias):
         """Translates an ALIAS expression (e.g., col AS c)."""
@@ -74,7 +47,22 @@ class SparkTranslator:
         left = self._translate_expression_to_spark(expression.left)
         right = self._translate_expression_to_spark(expression.right)
 
-        op_func = self._OP_MAP.get(type(expression))
+        op_map = {
+            exp.Mul: lambda a, b: a * b,
+            exp.Sub: lambda a, b: a - b,
+            exp.Add: lambda a, b: a + b,
+            exp.Div: lambda a, b: a / b,
+            exp.EQ: lambda a, b: a == b,
+            exp.NEQ: lambda a, b: a != b,
+            exp.GT: lambda a, b: a > b,
+            exp.GTE: lambda a, b: a >= b,
+            exp.LT: lambda a, b: a < b,
+            exp.LTE: lambda a, b: a <= b,
+            exp.And: lambda a, b: a & b,
+            exp.Or: lambda a, b: a | b,
+        }
+
+        op_func = op_map.get(type(expression))
         if op_func:
             return op_func(left, right)
 
@@ -84,16 +72,21 @@ class SparkTranslator:
         """Translates all AGGREGATE expressions (e.g., SUM, COUNT)."""
         inner_expr = self._translate_expression_to_spark(expression.this)
 
-        agg_func_name = self._AGG_MAP.get(type(expression))
-        if not agg_func_name:
+        agg_map = {
+            exp.Sum: F.sum,
+            exp.Avg: F.avg,
+            exp.Count: F.count,
+            exp.Min: F.min,
+            exp.Max: F.max,
+        }
+
+        agg_func = agg_map.get(type(expression))
+        if not agg_func:
             raise NotImplementedError(
                 f"Unsupported aggregate function: {type(expression)}"
             )
 
-        # Retrieve the pyspark function dynamically
-        agg_func = getattr(F, agg_func_name)
         agg_expr = agg_func(inner_expr)
-        
         if type(expression) in [exp.Sum, exp.Avg]:
             # Cast aggregates to a high-precision decimal
             agg_expr = agg_expr.cast(DecimalType(38, 6))
@@ -113,7 +106,9 @@ class SparkTranslator:
 
     def _translate_expression_to_spark(self, expression: exp.Expression):
         """
+        [Sonar Refactor]
         Translates a sqlglot Expression into a PySpark Column expression.
+        Delegates to helper methods to reduce cognitive complexity.
         """
         if not SPARK_AVAILABLE:
             raise ImportError("PySpark is not installed or available.")
@@ -125,23 +120,19 @@ class SparkTranslator:
         if isinstance(expression, exp.AggFunc):
             return self._translate_agg_func(expression)
 
-        if isinstance(expression, exp.Alias):
-            return self._translate_alias(expression)
-            
-        if isinstance(expression, exp.Column):
-            return self._translate_column(expression)
-            
-        if isinstance(expression, exp.Literal):
-            return self._translate_literal(expression)
-            
-        if isinstance(expression, exp.Paren):
-            return self._translate_paren(expression)
-            
-        if isinstance(expression, exp.Cast):
-            return self._translate_cast(expression)
-            
-        if isinstance(expression, exp.Star):
-            return self._translate_star(expression)
+        translator_map = {
+            exp.Alias: self._translate_alias,
+            exp.Column: self._translate_column,
+            exp.Literal: self._translate_literal,
+            exp.Paren: self._translate_paren,
+            exp.Cast: self._translate_cast,
+            exp.Star: self._translate_star,
+        }
+
+        translator = translator_map.get(type(expression))
+
+        if translator:
+            return translator(expression)
 
         raise NotImplementedError(
             f"Unsupported SQL expression for Spark translation: {type(expression)}"
