@@ -159,7 +159,7 @@ def load_table(r, table_name):
             except IndexError:
                 continue
 
-            if count % 50000 == 0:
+            if count % 2000 == 0:
                 pipeline.execute()
                 pipeline = r.pipeline()
                 print(f"Queued {count} rows...", end="\r")
@@ -186,4 +186,3 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"❌ Error loading Redis: {e}")
         sys.exit(1)
-

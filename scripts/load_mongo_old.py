@@ -111,7 +111,7 @@ def parse_row(table, parts):
     return None
 
 
-def load_table(db, table_name, batch_size=50000):
+def load_table(db, table_name, batch_size=2000):
     file_path = get_file_path(table_name)
     if not os.path.exists(file_path):
         print(f"Skipping {table_name}: File not found at {file_path}")
@@ -137,13 +137,13 @@ def load_table(db, table_name, batch_size=50000):
                 batch.append(doc)
 
             if len(batch) >= batch_size:
-                collection.insert_many(batch, ordered=False)
+                collection.insert_many(batch)
                 count += len(batch)
                 batch = []
                 print(f"Inserted {count} rows...", end="\r")
 
     if batch:
-        collection.insert_many(batch, ordered=False)
+        collection.insert_many(batch)
         count += len(batch)
 
     print(f"\n✅ Loaded {count} records into '{table_name}' collection.")
@@ -174,4 +174,3 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"❌ Error loading MongoDB: {e}")
         sys.exit(1)
-

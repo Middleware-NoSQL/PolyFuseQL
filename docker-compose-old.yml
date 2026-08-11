@@ -13,17 +13,15 @@ services:
   # ────────────── TPC-H Data Generator (DBGEN) ────────────── #
   dbgen:
     build: ./docker/dbgen
-    container_name: polyfuseql-tpch-dbgen
-    profiles: [ "dbgen" ]
+    container_name: polyfuseql_tpch_dbgen
     volumes:
       - ./docker/tpch-data:/data
     entrypoint: /bin/sh
     # Updated command to use the Python CLI tool 'tpchgen'
     # Arguments (--scale, --output) are compatible with the Rust version
     command: >
-      -c "rm -f /data/*.tbl && 
-          tpchgen-cli --scale-factor $${SCALE_FACTOR:-10} --output-dir /data && 
-          chown $${UID:-1000}:$${GID:-1000} /data/*"
+      -c "tpchgen-cli --scale-factor 0.01 --output-dir /data && 
+          chown ${UID:-1000}:${GID:-1000} /data/*"
     networks:
       - polyfuse-net
 
@@ -31,7 +29,7 @@ services:
   # ────────────── PostgreSQL ────────────── #
   postgres:
     image: postgres:16-alpine
-    container_name: polyfuseql-pg-tpch
+    container_name: polyfuseql_pg_tpch
     profiles: [ "postgres", "db" ]
     environment:
       POSTGRES_DB: tpch
@@ -49,13 +47,16 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    depends_on:
+      dbgen:
+        condition: service_completed_successfully
     networks:
       - polyfuse-net
 
   # ────────────── Redis ────────────── #
   redis:
     image: redis/redis-stack:latest
-    container_name: polyfuseql-redis-kv
+    container_name: polyfuseql_redis_kv
     profiles: [ "redis", "db" ]
     command: [ "redis-stack-server", "--requirepass", "tpch", "--protected-mode", "no" ]
     volumes:
@@ -72,7 +73,7 @@ services:
   # ────────────── Neo4j ────────────── #
   neo4j:
     image: neo4j:5-community
-    container_name: polyfuseql-neo4j-graph
+    container_name: polyfuseql_neo4j_graph
     profiles: [ "neo4j", "db" ]
     user: "${UID:-1000}:${GID:-1000}"
     environment:
@@ -81,10 +82,6 @@ services:
       NEO4J_apoc_import_file_enabled: "true"
       NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
       NEO4J_server_directories_import: "/var/lib/neo4j/import"
-      NEO4J_server_memory_heap_initial__size: 16G
-      NEO4J_server_memory_heap_max__size: 16G
-      NEO4J_server_memory_pagecache_size: 16G
-      NEO4J_dbms_memory_transaction_total_max: 0
     volumes:
       - ./docker/tpch-data:/var/lib/neo4j/import/tpch-data:ro
       - ./tests/fixtures:/var/lib/neo4j/import/fixtures:ro
@@ -96,13 +93,16 @@ services:
       interval: 10s
       timeout: 15s
       retries: 20
+    depends_on:
+      dbgen:
+        condition: service_completed_successfully
     networks:
       - polyfuse-net
 
   # ────────────── MongoDB ────────────── #
   mongodb:
     image: mongo:latest
-    container_name: polyfuseql-mongodb
+    container_name: polyfuseql_mongodb
     profiles: [ "mongodb", "db" ]
     ports:
       - "27018:27017"
@@ -123,7 +123,7 @@ services:
   # ────────────── Cassandra ────────────── #
   cassandra:
     image: cassandra:latest
-    container_name: polyfuseql-cassandra
+    container_name: polyfuseql_cassandra
     profiles: [ "cassandra", "db", "cassandra-services" ]
     ports:
       - "9043:9042"
@@ -158,7 +158,7 @@ services:
     build:
       context: .
       dockerfile: docker/mongo-translator/Dockerfile
-    container_name: polyfuseql-mongo-translator
+    container_name: polyfuseql_mongo_translator
     profiles: [ "mongo-translator", "api" ]
     ports:
       - "5101:5000"
@@ -182,7 +182,7 @@ services:
     build:
       context: . # The context is the root of your project
       dockerfile: docker/cassandra-translator/Dockerfile # Path to the new Dockerfile
-    container_name: polyfuseql-cassandra-translator
+    container_name: polyfuseql_cassandra_translator
     profiles: [ "cassandra-translator", "api","cassandra-services" ]
     ports:
       - "3101:3000"
@@ -212,7 +212,7 @@ services:
     build:
       context: .
       dockerfile: docker/cassandra-auth-service/Dockerfile
-    container_name: polyfuseql-cassandra-translator-auth
+    container_name: polyfuseql_cassandra_translator_auth
     profiles: [ "cassandra-auth", "api", "cassandra-services" ]
     ports:
       - "3001:3001"
@@ -241,7 +241,7 @@ services:
     build:
       context: .
       dockerfile: docker/cassandra-permission-service/Dockerfile
-    container_name: polyfuseql-cassandra-translator-permission
+    container_name: polyfuseql_cassandra_translator_permission
     profiles: [ "cassandra-permission", "api", "cassandra-services" ]
     ports:
       - "3002:3002"
@@ -259,7 +259,7 @@ services:
     networks:
       - polyfuse-net
   polyfuseql:
-    container_name: polyfuseql-app
+    container_name: polyfuseql_app
     build:
       context: .
       dockerfile: docker/polyfuseql/Dockerfile
@@ -278,7 +278,7 @@ services:
   postgres-loader:
     # Use standard Postgres image just to get the 'psql' client tool
     image: postgres:16-alpine
-    container_name: polyfuseql-loader-postgres-client
+    container_name: polyfuseql_loader_postgres_client
     profiles: [ "loader", "postgres-loader" ]
     volumes:
       - ./scripts:/scripts:ro
@@ -298,7 +298,7 @@ services:
   neo4j-loader:
     # Use Neo4j image just to get 'cypher-shell' client tool
     image: neo4j:5-community
-    container_name: polyfuseql-loader-neo4j-client
+    container_name: polyfuseql_loader_neo4j_client
     profiles: [ "loader", "neo4j-loader" ]
     volumes:
       - ./scripts:/scripts:ro
@@ -320,7 +320,7 @@ services:
   redis-loader:
     # Lightweight python image to run the load script
     image: python:3.12-slim
-    container_name: polyfuseql-loader-redis-client
+    container_name: polyfuseql_loader_redis_client
     profiles: [ "loader", "redis-loader" ]
     volumes:
       - ./docker/tpch-data:/data:ro
@@ -339,7 +339,7 @@ services:
       - polyfuse-net
   mongo-loader:
     image: python:3.12-slim
-    container_name: polyfuseql-loader-mongo-client
+    container_name: polyfuseql_loader_mongo_client
     profiles: [ "loader", "mongo-loader" ]
     volumes:
       - ./docker/tpch-data:/data:ro
@@ -360,7 +360,7 @@ services:
 
   cassandra-loader:
     image: python:3.12-slim
-    container_name: polyfuseql-loader-cassandra-client
+    container_name: polyfuseql_loader_cassandra_client
     profiles: [ "loader", "cassandra-loader" ]
     volumes:
       - ./docker/tpch-data:/data:ro

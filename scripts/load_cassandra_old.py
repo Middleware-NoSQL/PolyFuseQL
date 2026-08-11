@@ -2,7 +2,6 @@ import os
 import sys
 from cassandra.cluster import Cluster
 from cassandra.auth import PlainTextAuthProvider
-from cassandra.concurrent import execute_concurrent_with_args
 import threading
 
 # Configuration
@@ -242,16 +241,6 @@ def parse_and_bind(table, parts):
         return None
 
 
-def generate_data(file_path, table_name):
-    with open(file_path, "r") as f:
-        for line in f:
-            parts = line.strip().split("|")
-            if parts and parts[-1] == "":
-                parts.pop()
-            data = parse_and_bind(table_name, parts)
-            if data:
-                yield data
-
 def load_table(session, table_name):
     file_path = os.path.join(DATA_DIR, f"{table_name}.tbl")
     if not os.path.exists(file_path):
@@ -267,21 +256,37 @@ def load_table(session, table_name):
         print(f"Warning truncating {table_name}: {e}")
 
     statement = PREPARED_STMTS[table_name]
-    
-    # Use Cassandra's optimized concurrent executor
-    # We pass the generator so we don't load the entire 10GB file into RAM at once!
-    generator = generate_data(file_path, table_name)
-    
-    # Execute with concurrency 1000
-    results = execute_concurrent_with_args(session, statement, generator, concurrency=20)
-    
-    success_count = sum(1 for success, _ in results if success)
-    error_count = sum(1 for success, _ in results if not success)
+    concurrency_limit = 100
+    sem = threading.Semaphore(concurrency_limit)
 
-    if error_count > 0:
-        print(f"Warning: {error_count} errors during insert for {table_name}")
+    def handle_error(e):
+        print(f"Insert Error: {e}")
+        sem.release()
 
-    print(f"\n✅ Loaded {success_count} records into '{table_name}'.")
+    def handle_success(result):
+        sem.release()
+
+    count = 0
+    with open(file_path, "r") as f:
+        for line in f:
+            parts = line.strip().split("|")
+            if parts and parts[-1] == "":
+                parts.pop()
+
+            data = parse_and_bind(table_name, parts)
+            if data:
+                sem.acquire()
+                future = session.execute_async(statement, data)
+                future.add_callbacks(handle_success, handle_error)
+                count += 1
+                if count % 2000 == 0:
+                    print(f"Queued {count} rows...", end="\r")
+
+    # Wait for remaining queries
+    for _ in range(concurrency_limit):
+        sem.acquire()
+
+    print(f"\n✅ Loaded {count} records into '{table_name}'.")
 
 
 if __name__ == "__main__":
@@ -311,4 +316,3 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"❌ Error loading Cassandra: {e}")
         sys.exit(1)
-
